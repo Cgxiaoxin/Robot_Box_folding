@@ -408,10 +408,20 @@ class GroupController:
             for aid, runtime in self._get_target_arms(arm_id):
                 try:
                     target = [runtime.zero_offsets.get(mid, 0.0) for mid in runtime.motor_ids]
-                    runtime.arm.move_j(target, blocking=False)
+                    self._set_arm_angles_direct(runtime, target, blocking=False)
                     self._refresh_runtime_state(runtime)
                 except Exception as e:
                     self._emit_error(f"{aid} 臂回零失败: {e}")
+
+    def hold_current_pose(self, arm_id: Optional[str] = None):
+        with self._lock:
+            for aid, runtime in self._get_target_arms(arm_id):
+                try:
+                    current = self._read_arm_angles(runtime)
+                    self._set_arm_angles_direct(runtime, current, blocking=True)
+                    self._refresh_runtime_state(runtime)
+                except Exception as e:
+                    self._emit_error(f"{aid} 臂保持当前姿态失败: {e}")
 
     def _sync_arm_state_to_public(self, arm_id: str, runtime: ArmRuntime):
         motors_data: Dict[int, Dict[str, Any]] = {}
@@ -477,8 +487,25 @@ class GroupController:
                 self._emit_error(f"读取电机 {motor_id} 位置失败: {e}")
                 return None
 
-    def _set_arm_angles_direct(self, runtime: ArmRuntime, target_angles: List[float]):
-        runtime.arm.move_j(target_angles, blocking=False)
+    def _read_arm_angles(self, runtime: ArmRuntime) -> List[float]:
+        arm_obj = runtime.arm if hasattr(runtime, "arm") else runtime
+        if hasattr(arm_obj, "get_angles"):
+            try:
+                return [float(value) for value in arm_obj.get_angles()]
+            except Exception:
+                pass
+        return [float(runtime.motors[mid].position) for mid in runtime.motor_ids]
+
+    def _set_arm_angles_direct(self, runtime: ArmRuntime, target_angles: List[float], *, blocking: bool = False):
+        arm_obj = runtime.arm if hasattr(runtime, "arm") else runtime
+        if hasattr(arm_obj, "move_j"):
+            arm_obj.move_j(target_angles, blocking=blocking)
+            return
+        if hasattr(arm_obj, "set_position"):
+            for mid, pos in zip(runtime.motor_ids, target_angles):
+                arm_obj.set_position(mid, float(pos))
+            return
+        raise AttributeError("arm object does not support move_j or set_position")
 
     def set_position(self, arm_id: str, motor_id: int, position: float) -> bool:
         with self._lock:
@@ -498,12 +525,11 @@ class GroupController:
                 )
                 return False
             try:
-                arm_obj = runtime.arm if hasattr(runtime, "arm") else runtime
-                current = arm_obj.get_angles()
+                current = self._read_arm_angles(runtime)
                 motor_ids = list(getattr(runtime, "motor_ids", list(motors.keys())))
                 idx = motor_ids.index(motor_id)
                 current[idx] = float(position)
-                self._set_arm_angles_direct(runtime, current)
+                self._set_arm_angles_direct(runtime, current, blocking=True)
 
                 if hasattr(motors[motor_id], "position"):
                     motors[motor_id].position = float(position)
@@ -557,7 +583,7 @@ class GroupController:
                 for idx, mid in enumerate(runtime.motor_ids)
             ]
             try:
-                self._set_arm_angles_direct(runtime, target_abs)
+                self._set_arm_angles_direct(runtime, target_abs, blocking=False)
                 return True
             except Exception as e:
                 self._emit_error(f"批量设置关节失败: {e}")

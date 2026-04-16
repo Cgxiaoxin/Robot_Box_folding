@@ -864,9 +864,10 @@ function enableFreedrive() {
 
 function disableFreedrive() {
     socket.emit('drag_teach_disable', {
-        arm_id: getSelectedArmIdForDragTeach()
+        arm_id: getSelectedArmIdForDragTeach(),
+        preserve_pose: true
     });
-    addLog('退出拖拽示教模式', 'info');
+    addLog('退出拖拽示教模式，保持当前姿态', 'info');
 }
 
 function dragTeachStartSegment() {
@@ -909,7 +910,7 @@ function dragTeachListSegments() {
 
 function jogMotor(armId, motorId, direction) {
     const step = parseFloat(document.getElementById('jog-step')?.value || '0.1');
-    const currentPos = appState.arms?.[armId]?.motors?.[motorId]?.position || 0;
+    const currentPos = appState.arms?.[armId]?.motors?.[motorId]?.relative_position || 0;
     let dir = direction;
     if (armId === 'right' && RIGHT_INVERT_MOTORS.has(motorId)) {
         dir = -dir;
@@ -933,12 +934,11 @@ function jogMotor(armId, motorId, direction) {
         }
     }
 
-    // 使用平滑插值移动
-    socket.emit('smooth_manual_move', {
+    // 直接下发相对零点目标，避免连续微步与正在移动的动作抢占
+    socket.emit('manual_set_position_offset', {
         arm_id: armId,
         motor_id: motorId,
-        position: newPos,
-        duration_ms: 300
+        position: newPos
     });
 }
 

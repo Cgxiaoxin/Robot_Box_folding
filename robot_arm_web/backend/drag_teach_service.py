@@ -275,13 +275,32 @@ class DragTeachService:
             self._notify_state()
             return self.get_public_state()
 
-    def disable(self, arm_id: Optional[str] = None) -> Dict[str, Any]:
+    def disable(self, arm_id: Optional[str] = None, *, preserve_pose: bool = True) -> Dict[str, Any]:
         with self._lock:
             scope = self._resolve_arm_scope(arm_id)
+            pose_snapshot: Dict[str, List[float]] = {}
+            if preserve_pose:
+                self.controller.read_positions()
+                for aid in scope:
+                    runtime = getattr(self.controller, "arms", {}).get(aid)
+                    if runtime is None:
+                        continue
+                    try:
+                        pose_snapshot[aid] = [float(runtime.motors[mid].position) for mid in runtime.motor_ids]
+                    except Exception:
+                        continue
             if self._session and any(aid in self._session.arm_scope for aid in scope):
                 self._stop_stream_session(record_final_sample=False)
             self._teardown_mit_compliance(scope)
             self._teardown_soft_compliance(scope)
+            if preserve_pose and pose_snapshot:
+                try:
+                    for aid in scope:
+                        if aid in pose_snapshot:
+                            self.controller.hold_current_pose(arm_id=aid)
+                except Exception as exc:
+                    for aid in scope:
+                        self._arm_states[aid].error = str(exc)
             for aid in scope:
                 state = self._arm_states[aid]
                 state.mode_enabled = False

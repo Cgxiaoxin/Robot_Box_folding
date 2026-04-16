@@ -60,6 +60,14 @@ class FakeArm:
         self.zero_offsets = {mid: 0.0 for mid in motor_ids}
         self.profile = []
 
+    def get_angles(self):
+        return [self.motors[mid].position for mid in self.motor_ids]
+
+    def move_j(self, target_angles, blocking=False):
+        self.positions_set.append((tuple(target_angles), blocking))
+        for mid, pos in zip(self.motor_ids, target_angles):
+            self.motors[mid].position = pos
+
     def set_position(self, motor_id, position):
         self.positions_set.append((motor_id, position))
         self.motors[motor_id].position = position
@@ -102,7 +110,8 @@ def test_set_position_accepts_valid_value():
     controller = make_controller_with_fake_arms()
     ok = controller.set_position("left", 51, 0.3)
     assert ok is True
-    assert controller.arms["left"].positions_set[-1] == (51, 0.3)
+    assert controller.arms["left"].positions_set[-1][1] is True
+    assert controller.arms["left"].motors[51].position == 0.3
 
 
 def test_get_target_arms_follows_current_target():

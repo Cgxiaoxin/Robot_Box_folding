@@ -802,7 +802,7 @@ def _drag_teach_disable_impl(sid, data, legacy_event: Optional[str] = None):
     payload = data or {}
     arm_id = payload.get("arm_id")
     try:
-        state = drag_teach.disable(arm_id=arm_id)
+        state = drag_teach.disable(arm_id=arm_id, preserve_pose=bool(payload.get("preserve_pose", True)))
         audit_logger.log_operation(
             legacy_event or "drag_teach_disable",
             details={"sid": sid, "arm_id": arm_id or "target"},

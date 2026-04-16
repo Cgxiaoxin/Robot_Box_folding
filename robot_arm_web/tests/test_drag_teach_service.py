@@ -6,16 +6,49 @@ from backend.drag_teach_service import DragTeachService, DragTeachSession, flatt
 class _FakeArmHandle:
     def __init__(self):
         self.enable_calls = 0
+        self.profile_calls = []
+        self.position_kp = []
+        self.velocity_kp = []
+        self.velocity_ki = []
+        self.velocities = []
+        self.accelerations = []
 
     def enable(self):
         self.enable_calls += 1
+
+    def set_position_kps(self, values):
+        self.position_kp = list(values)
+        self.profile_calls.append(("position_kp", list(values)))
+
+    def set_velocity_kps(self, values):
+        self.velocity_kp = list(values)
+        self.profile_calls.append(("velocity_kp", list(values)))
+
+    def set_velocity_kis(self, values):
+        self.velocity_ki = list(values)
+        self.profile_calls.append(("velocity_ki", list(values)))
+
+    def set_velocities(self, values):
+        self.velocities = list(values)
+        self.profile_calls.append(("velocity", list(values)))
+
+    def set_accelerations(self, values):
+        self.accelerations = list(values)
+        self.profile_calls.append(("acceleration", list(values)))
+
+    def move_j(self, target_angles, blocking=False):
+        self.profile_calls.append(("move_j", list(target_angles), blocking))
+
+    def get_angles(self):
+        return [0.0] * 7
 
 
 class _FakeRuntime:
     def __init__(self, motor_ids):
         self.arm = _FakeArmHandle()
         self.enabled = False
-        self.motors = {mid: SimpleNamespace(enabled=False) for mid in motor_ids}
+        self.motor_ids = list(motor_ids)
+        self.motors = {mid: SimpleNamespace(enabled=False, position=float(mid) / 100.0) for mid in motor_ids}
 
 
 class _FakeController:
@@ -28,6 +61,8 @@ class _FakeController:
         }
         self.speed_calls = []
         self.stop_playback_calls = 0
+        self.read_positions_calls = 0
+        self.hold_current_pose_calls = []
         self.positions = {
             "left": {"51": 0.1, "52": 0.2},
             "right": {"61": -0.1, "62": -0.2},
@@ -39,6 +74,13 @@ class _FakeController:
     def stop_playback(self):
         self.stop_playback_calls += 1
         self.playback.state = "idle"
+
+    def read_positions(self):
+        self.read_positions_calls += 1
+
+    def hold_current_pose(self, arm_id=None):
+        self.hold_current_pose_calls.append(arm_id)
+        return {}
 
     def record_point(self, name=None, arm_id=None):
         if arm_id in ("left", "right"):
@@ -166,3 +208,15 @@ def test_mit_mode_requires_explicit_config(tmp_path):
         assert "mit_config_file" in str(exc)
     else:
         raise AssertionError("expected ValueError when MIT config is missing")
+
+
+def test_disable_preserves_current_pose(tmp_path):
+    controller = _FakeController()
+    service = DragTeachService(controller, trajectories_dir=tmp_path)
+
+    service.enable(arm_id="left")
+    state = service.disable(arm_id="left", preserve_pose=True)
+
+    assert controller.read_positions_calls >= 1
+    assert controller.hold_current_pose_calls == ["left"]
+    assert state["arms"]["left"]["status"] == "idle"
