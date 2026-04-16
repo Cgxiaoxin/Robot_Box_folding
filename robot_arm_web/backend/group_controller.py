@@ -1,0 +1,783 @@
+"""
+群控管理器 - 基于 linkerbot-py(A7) 的双臂控制。
+
+说明:
+- 本文件仅保留 A7 直连实现。
+- 已移除旧 arm_control 路径，避免运行时实现混淆。
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
+from linkerbot import A7, ControlMode
+from linkerbot.arm.a7.motor import A7Motor
+
+from .config import (
+    DEFAULT_LEFT_CAN,
+    DEFAULT_RIGHT_CAN,
+    INIT_HOME_BLOCKING,
+    INIT_HOME_ENABLED,
+    JOINT_LIMITS,
+    LEFT_MOTOR_IDS,
+    RIGHT_MOTOR_IDS,
+    SPEED_PRESETS,
+    TRAJECTORIES_DIR,
+    ZERO_OFFSET_FILE,
+)
+
+
+def _install_linkerbot_handshake_fallback():
+    """
+    兼容不同 linkerbot 构建的握手命令差异。
+    """
+    if getattr(A7Motor, "_handshake_fallback_installed", False):
+        return
+
+    origin_check_alive = A7Motor.check_alive
+
+    def _patched_check_alive(self, timeout_s: float = 0.05) -> bool:
+        try:
+            if origin_check_alive(self, timeout_s):
+                return True
+        except Exception:
+            pass
+        try:
+            self._read_register(0x01, timeout_s)  # type: ignore[attr-defined]
+            return True
+        except Exception:
+            return False
+
+    A7Motor.check_alive = _patched_check_alive  # type: ignore[assignment]
+    A7Motor._handshake_fallback_installed = True  # type: ignore[attr-defined]
+
+
+_install_linkerbot_handshake_fallback()
+
+
+class ControlTarget(Enum):
+    LEFT = "left"
+    RIGHT = "right"
+    BOTH = "both"
+
+
+class PlaybackState(Enum):
+    IDLE = "idle"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    STOPPING = "stopping"
+
+
+@dataclass
+class ArmState:
+    connected: bool = False
+    initialized: bool = False
+    can_channel: str = ""
+    motors: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    error: Optional[str] = None
+
+
+@dataclass
+class PlaybackInfo:
+    state: PlaybackState = PlaybackState.IDLE
+    trajectory_name: str = ""
+    current_point: int = 0
+    total_points: int = 0
+    progress: float = 0.0
+
+
+@dataclass
+class MotorCache:
+    position: float = 0.0
+    velocity: float = 0.0
+    enabled: bool = False
+    mode: int = 5
+
+
+@dataclass
+class ArmRuntime:
+    arm: A7
+    arm_id: str
+    sdk_side: str
+    can_channel: str
+    motor_ids: List[int]
+    motors: Dict[int, MotorCache] = field(default_factory=dict)
+    zero_offsets: Dict[int, float] = field(default_factory=dict)
+    enabled: bool = False
+
+
+class GroupController:
+    def __init__(self):
+        self.arms: Dict[str, Optional[ArmRuntime]] = {"left": None, "right": None}
+        self.arm_states: Dict[str, ArmState] = {
+            "left": ArmState(can_channel=DEFAULT_LEFT_CAN),
+            "right": ArmState(can_channel=DEFAULT_RIGHT_CAN),
+        }
+        self.target = ControlTarget.BOTH
+        self.playback = PlaybackInfo()
+
+        self._lock = threading.RLock()
+        self._playback_thread: Optional[threading.Thread] = None
+        self._stop_playback = threading.Event()
+        self._pause_playback = threading.Event()
+
+        default_speed = SPEED_PRESETS.get("slow", {"velocity": 0.5, "accel": 0.5, "decel": 0.5})
+        self.speed_params = {
+            "velocity": float(default_speed.get("velocity", 1.0)),
+            "accel": float(default_speed.get("accel", 1.0)),
+            "decel": float(default_speed.get("decel", 1.0)),
+        }
+
+        self._on_state_update: Optional[Callable] = None
+        self._on_playback_progress: Optional[Callable] = None
+        self._on_error: Optional[Callable] = None
+
+        self.joint_limits: Dict[str, Dict[int, Dict[str, float]]] = {"left": {}, "right": {}}
+        self._init_joint_limits()
+
+        self._zero_offsets_all: Dict[str, Dict[int, float]] = {"left": {}, "right": {}}
+        self._load_zero_offsets_all()
+        self.connect_retry_count = 3
+        self.connect_retry_delay_s = 0.25
+
+    def set_callbacks(
+        self,
+        on_state_update: Optional[Callable] = None,
+        on_playback_progress: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
+    ):
+        self._on_state_update = on_state_update
+        self._on_playback_progress = on_playback_progress
+        self._on_error = on_error
+
+    def _emit_error(self, message: str):
+        print(f"[GroupController Error] {message}")
+        if self._on_error:
+            try:
+                self._on_error(message)
+            except Exception:
+                pass
+
+    def _init_joint_limits(self):
+        try:
+            left_cfg = JOINT_LIMITS.get("left", {})
+            right_cfg = JOINT_LIMITS.get("right", {})
+            for idx, mid in enumerate(LEFT_MOTOR_IDS):
+                mins = left_cfg.get("position_min") or []
+                maxs = left_cfg.get("position_max") or []
+                self.joint_limits["left"][mid] = {
+                    "min": float(mins[idx]) if idx < len(mins) else -3.14,
+                    "max": float(maxs[idx]) if idx < len(maxs) else 3.14,
+                }
+            for idx, mid in enumerate(RIGHT_MOTOR_IDS):
+                mins = right_cfg.get("position_min") or []
+                maxs = right_cfg.get("position_max") or []
+                self.joint_limits["right"][mid] = {
+                    "min": float(mins[idx]) if idx < len(mins) else -3.14,
+                    "max": float(maxs[idx]) if idx < len(maxs) else 3.14,
+                }
+        except Exception as e:
+            print(f"[GroupController] 初始化关节限位失败，使用默认值: {e}")
+            for mid in LEFT_MOTOR_IDS:
+                self.joint_limits["left"][mid] = {"min": -3.14, "max": 3.14}
+            for mid in RIGHT_MOTOR_IDS:
+                self.joint_limits["right"][mid] = {"min": -3.14, "max": 3.14}
+
+    def _get_joint_limit(self, arm_id: str, motor_id: int) -> Optional[Dict[str, float]]:
+        return self.joint_limits.get(arm_id, {}).get(motor_id)
+
+    def _arm_to_sdk_side(self, arm_id: str) -> str:
+        # A7 内部: side=right -> 51~57, side=left -> 61~67
+        return "right" if arm_id == "left" else "left"
+
+    def _arm_motor_ids(self, arm_id: str) -> List[int]:
+        return LEFT_MOTOR_IDS if arm_id == "left" else RIGHT_MOTOR_IDS
+
+    def _load_zero_offsets_all(self):
+        data: Dict[str, float] = {}
+        if ZERO_OFFSET_FILE.exists():
+            try:
+                with open(ZERO_OFFSET_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                    if isinstance(raw, dict):
+                        data = raw
+            except Exception as e:
+                print(f"[GroupController] 读取零点文件失败: {e}")
+
+        for arm_id, mids in (("left", LEFT_MOTOR_IDS), ("right", RIGHT_MOTOR_IDS)):
+            offsets: Dict[int, float] = {}
+            for mid in mids:
+                try:
+                    offsets[mid] = float(data.get(str(mid), 0.0))
+                except Exception:
+                    offsets[mid] = 0.0
+            self._zero_offsets_all[arm_id] = offsets
+
+    def _save_zero_offsets_all(self):
+        payload: Dict[str, float] = {}
+        for arm_id in ("left", "right"):
+            for mid, val in self._zero_offsets_all.get(arm_id, {}).items():
+                payload[str(mid)] = float(val)
+        try:
+            ZERO_OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(ZERO_OFFSET_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            self._emit_error(f"保存零点失败: {e}")
+
+    def _create_runtime(self, arm_id: str, channel: str) -> ArmRuntime:
+        arm = None
+        try:
+            arm = A7(side=self._arm_to_sdk_side(arm_id), interface_name=channel)
+            runtime = ArmRuntime(
+                arm=arm,
+                arm_id=arm_id,
+                sdk_side=self._arm_to_sdk_side(arm_id),
+                can_channel=channel,
+                motor_ids=self._arm_motor_ids(arm_id),
+                motors={mid: MotorCache() for mid in self._arm_motor_ids(arm_id)},
+                zero_offsets=dict(self._zero_offsets_all.get(arm_id, {})),
+                enabled=False,
+            )
+            self._refresh_runtime_state(runtime)
+            return runtime
+        except Exception:
+            if arm is not None:
+                try:
+                    arm.close()
+                except Exception:
+                    pass
+            raise
+
+    def _refresh_runtime_state(self, runtime: ArmRuntime):
+        state = runtime.arm.get_state()
+        angles = [x.angle for x in state.joint_angles]
+        velocities = [x.velocity for x in state.joint_velocities]
+        for i, mid in enumerate(runtime.motor_ids):
+            runtime.motors[mid].position = float(angles[i])
+            runtime.motors[mid].velocity = float(velocities[i])
+            runtime.motors[mid].enabled = bool(runtime.enabled)
+            runtime.motors[mid].mode = 5
+
+    def connect(self, arm_id: str, can_channel: Optional[str] = None) -> bool:
+        if arm_id not in self.arms:
+            self._emit_error(f"未知机械臂ID: {arm_id}")
+            return False
+        with self._lock:
+            if self.arms[arm_id] is not None:
+                self.disconnect(arm_id)
+            channel = can_channel or self.arm_states[arm_id].can_channel
+            self.arm_states[arm_id].can_channel = channel
+            last_error: Optional[Exception] = None
+            for attempt in range(1, self.connect_retry_count + 1):
+                try:
+                    print(f"[GroupController] 连接 {arm_id} 臂 ({channel})... [attempt {attempt}/{self.connect_retry_count}]")
+                    runtime = self._create_runtime(arm_id, channel)
+                    self.arms[arm_id] = runtime
+                    self.arm_states[arm_id].connected = True
+                    self.arm_states[arm_id].error = None
+                    return True
+                except Exception as e:
+                    last_error = e
+                    self.arm_states[arm_id].error = str(e)
+                    self.arms[arm_id] = None
+                    self.arm_states[arm_id].connected = False
+                    self.arm_states[arm_id].initialized = False
+                    self.arm_states[arm_id].motors = {}
+                    self._emit_error(
+                        f"{arm_id} 臂连接异常(第 {attempt}/{self.connect_retry_count} 次): {e}"
+                    )
+                    if attempt < self.connect_retry_count:
+                        time.sleep(self.connect_retry_delay_s)
+            if last_error is not None:
+                self._emit_error(f"{arm_id} 臂连接失败，已重试 {self.connect_retry_count} 次: {last_error}")
+            return False
+
+    def connect_all(self, left_channel: str = None, right_channel: str = None) -> Dict[str, bool]:
+        return {"left": self.connect("left", left_channel), "right": self.connect("right", right_channel)}
+
+    def disconnect(self, arm_id: str):
+        with self._lock:
+            runtime = self.arms.get(arm_id)
+            if runtime is not None:
+                try:
+                    runtime.arm.disable()
+                except Exception:
+                    pass
+                try:
+                    runtime.arm.close()
+                except Exception:
+                    pass
+            self.arms[arm_id] = None
+            self.arm_states[arm_id].connected = False
+            self.arm_states[arm_id].initialized = False
+            self.arm_states[arm_id].motors = {}
+            print(f"[GroupController] {arm_id} 臂已断开")
+
+    def disconnect_all(self):
+        self.disconnect("left")
+        self.disconnect("right")
+
+    def _get_target_arms(self, arm_id: Optional[str] = None) -> List[tuple[str, ArmRuntime]]:
+        arms: List[tuple[str, ArmRuntime]] = []
+        if arm_id:
+            runtime = self.arms.get(arm_id)
+            if runtime:
+                arms.append((arm_id, runtime))
+            return arms
+        if self.target in (ControlTarget.LEFT, ControlTarget.BOTH) and self.arms.get("left"):
+            arms.append(("left", self.arms["left"]))
+        if self.target in (ControlTarget.RIGHT, ControlTarget.BOTH) and self.arms.get("right"):
+            arms.append(("right", self.arms["right"]))
+        return arms
+
+    def init_arm(self, arm_id: str, mode: int = 5) -> bool:
+        del mode
+        with self._lock:
+            runtime = self.arms.get(arm_id)
+            if runtime is None:
+                self._emit_error(f"{arm_id} 臂未连接")
+                return False
+            try:
+                runtime.arm.set_control_mode(ControlMode.PP)
+                runtime.arm.enable()
+                runtime.enabled = True
+                self.arm_states[arm_id].initialized = True
+                self.set_speed(
+                    self.speed_params.get("velocity", 0.5),
+                    self.speed_params.get("accel", 0.5),
+                    self.speed_params.get("decel", 0.5),
+                    arm_id=arm_id,
+                )
+                if INIT_HOME_ENABLED:
+                    runtime.arm.home(blocking=INIT_HOME_BLOCKING)
+                self._refresh_runtime_state(runtime)
+                return True
+            except Exception as e:
+                self.arm_states[arm_id].error = str(e)
+                self._emit_error(f"{arm_id} 臂初始化失败: {e}")
+                return False
+
+    def init_target(self, mode: int = 5) -> Dict[str, bool]:
+        results: Dict[str, bool] = {}
+        if self.target in (ControlTarget.LEFT, ControlTarget.BOTH):
+            results["left"] = self.init_arm("left", mode)
+        if self.target in (ControlTarget.RIGHT, ControlTarget.BOTH):
+            results["right"] = self.init_arm("right", mode)
+        return results
+
+    def disable_arm(self, arm_id: Optional[str] = None):
+        with self._lock:
+            for aid, runtime in self._get_target_arms(arm_id):
+                try:
+                    runtime.arm.disable()
+                    runtime.enabled = False
+                    self.arm_states[aid].initialized = False
+                    for mid in runtime.motor_ids:
+                        runtime.motors[mid].enabled = False
+                except Exception as e:
+                    self._emit_error(f"{aid} 臂关闭失败: {e}")
+
+    def deactivate_arm(self, arm_id: Optional[str] = None, target: Optional[str] = None):
+        if target:
+            try:
+                self.target = ControlTarget(target)
+            except Exception:
+                pass
+        self.disable_arm(arm_id)
+
+    def emergency_stop(self):
+        self.stop_playback()
+        with self._lock:
+            for aid, runtime in self._get_target_arms():
+                try:
+                    runtime.arm.emergency_stop()
+                    runtime.arm.disable()
+                    runtime.enabled = False
+                    self.arm_states[aid].initialized = False
+                except Exception as e:
+                    self._emit_error(f"{aid} 臂急停失败: {e}")
+
+    def go_to_zero(self, arm_id: Optional[str] = None):
+        with self._lock:
+            for aid, runtime in self._get_target_arms(arm_id):
+                try:
+                    target = [runtime.zero_offsets.get(mid, 0.0) for mid in runtime.motor_ids]
+                    runtime.arm.move_j(target, blocking=False)
+                    self._refresh_runtime_state(runtime)
+                except Exception as e:
+                    self._emit_error(f"{aid} 臂回零失败: {e}")
+
+    def _sync_arm_state_to_public(self, arm_id: str, runtime: ArmRuntime):
+        motors_data: Dict[int, Dict[str, Any]] = {}
+        for mid, m in runtime.motors.items():
+            zero_off = runtime.zero_offsets.get(mid, 0.0)
+            motors_data[mid] = {
+                "position": m.position,
+                "relative_position": m.position - zero_off,
+                "velocity": m.velocity,
+                "enabled": m.enabled,
+                "mode": m.mode,
+            }
+        self.arm_states[arm_id].motors = motors_data
+
+    def get_state(self) -> Dict[str, Any]:
+        with self._lock:
+            state = {
+                "target": self.target.value,
+                "playback": {
+                    "state": self.playback.state.value,
+                    "trajectory_name": self.playback.trajectory_name,
+                    "current_point": self.playback.current_point,
+                    "total_points": self.playback.total_points,
+                    "progress": self.playback.progress,
+                },
+                "arms": {},
+                "joint_limits": {"left": {}, "right": {}},
+            }
+            for arm_id in ("left", "right"):
+                runtime = self.arms.get(arm_id)
+                arm_state = self.arm_states[arm_id]
+                if runtime is not None:
+                    self._sync_arm_state_to_public(arm_id, runtime)
+                state["arms"][arm_id] = {
+                    "connected": arm_state.connected,
+                    "initialized": arm_state.initialized,
+                    "can_channel": arm_state.can_channel,
+                    "error": arm_state.error,
+                    "motors": arm_state.motors,
+                }
+                for mid, limits in self.joint_limits.get(arm_id, {}).items():
+                    state["joint_limits"][arm_id][str(mid)] = {"min": limits["min"], "max": limits["max"]}
+            return state
+
+    def read_positions(self):
+        with self._lock:
+            for arm_id, runtime in self._get_target_arms():
+                try:
+                    self._refresh_runtime_state(runtime)
+                    self._sync_arm_state_to_public(arm_id, runtime)
+                except Exception:
+                    pass
+
+    def read_single_motor_position(self, arm_id: str, motor_id: int) -> Optional[float]:
+        with self._lock:
+            runtime = self.arms.get(arm_id)
+            if runtime is None or motor_id not in runtime.motors:
+                return None
+            try:
+                self._refresh_runtime_state(runtime)
+                return runtime.motors[motor_id].position
+            except Exception as e:
+                self._emit_error(f"读取电机 {motor_id} 位置失败: {e}")
+                return None
+
+    def _set_arm_angles_direct(self, runtime: ArmRuntime, target_angles: List[float]):
+        runtime.arm.move_j(target_angles, blocking=False)
+
+    def set_position(self, arm_id: str, motor_id: int, position: float) -> bool:
+        with self._lock:
+            runtime = self.arms.get(arm_id)
+            if runtime is None:
+                self._emit_error(f"{arm_id} 臂未连接")
+                return False
+            motors = getattr(runtime, "motors", {})
+            if motor_id not in motors:
+                self._emit_error(f"{arm_id} 臂未知电机ID: {motor_id}")
+                return False
+            limits = self._get_joint_limit(arm_id, motor_id)
+            if limits is not None and (position < limits["min"] or position > limits["max"]):
+                self._emit_error(
+                    f"{arm_id} 臂电机 {motor_id} 目标位置 {position:.4f} 超出软限位 "
+                    f"[{limits['min']:.4f}, {limits['max']:.4f}]"
+                )
+                return False
+            try:
+                arm_obj = runtime.arm if hasattr(runtime, "arm") else runtime
+                current = arm_obj.get_angles()
+                motor_ids = list(getattr(runtime, "motor_ids", list(motors.keys())))
+                idx = motor_ids.index(motor_id)
+                current[idx] = float(position)
+                self._set_arm_angles_direct(runtime, current)
+
+                if hasattr(motors[motor_id], "position"):
+                    motors[motor_id].position = float(position)
+                return True
+            except Exception as e:
+                self._emit_error(f"设置位置失败: {e}")
+                return False
+
+    def set_position_offset(self, arm_id: str, motor_id: int, position: float) -> bool:
+        with self._lock:
+            runtime = self.arms.get(arm_id)
+            if runtime is None:
+                self._emit_error(f"{arm_id} 臂未连接")
+                return False
+            limits = self._get_joint_limit(arm_id, motor_id)
+            if limits is not None and (position < limits["min"] or position > limits["max"]):
+                self._emit_error(
+                    f"{arm_id} 臂电机 {motor_id} 相对零点目标位置 {position:.4f} 超出软限位 "
+                    f"[{limits['min']:.4f}, {limits['max']:.4f}]"
+                )
+                return False
+            return self.set_position(arm_id, motor_id, float(position) + runtime.zero_offsets.get(motor_id, 0.0))
+
+    def set_joint_offsets(self, arm_id: str, joint_offsets: List[float]) -> bool:
+        """
+        批量设置 7 关节 URDF 角度(相对零点)。
+        该接口用于笛卡尔控制, 避免逐关节下发导致的抖动。
+        """
+        with self._lock:
+            runtime = self.arms.get(arm_id)
+            if runtime is None:
+                self._emit_error(f"{arm_id} 臂未连接")
+                return False
+            if len(joint_offsets) != len(runtime.motor_ids):
+                self._emit_error(f"{arm_id} 臂关节数量不匹配: 期望 {len(runtime.motor_ids)} 实际 {len(joint_offsets)}")
+                return False
+
+            # 先做整组软限位检查，全部通过后再一次性下发。
+            for idx, mid in enumerate(runtime.motor_ids):
+                joint_offset = float(joint_offsets[idx])
+                limits = self._get_joint_limit(arm_id, mid)
+                if limits is not None and (joint_offset < limits["min"] or joint_offset > limits["max"]):
+                    self._emit_error(
+                        f"{arm_id} 臂电机 {mid} 相对零点目标位置 {joint_offset:.4f} 超出软限位 "
+                        f"[{limits['min']:.4f}, {limits['max']:.4f}]"
+                    )
+                    return False
+
+            target_abs = [
+                float(joint_offsets[idx]) + runtime.zero_offsets.get(mid, 0.0)
+                for idx, mid in enumerate(runtime.motor_ids)
+            ]
+            try:
+                self._set_arm_angles_direct(runtime, target_abs)
+                return True
+            except Exception as e:
+                self._emit_error(f"批量设置关节失败: {e}")
+                return False
+
+    def set_speed(self, velocity: float, accel: float, decel: float, arm_id: Optional[str] = None):
+        with self._lock:
+            self.speed_params = {"velocity": float(velocity), "accel": float(accel), "decel": float(decel)}
+            v = max(0.0, float(velocity))
+            # A7 SDK acceleration 有效范围为 [1.0, 50.0]，避免初始化时报参数越界。
+            a = min(50.0, max(1.0, float(max(accel, decel))))
+            for _, runtime in self._get_target_arms(arm_id):
+                try:
+                    runtime.arm.set_velocities([v] * 7)
+                    runtime.arm.set_accelerations([a] * 7)
+                except Exception as e:
+                    self._emit_error(f"设置速度失败: {e}")
+
+    def set_speed_preset(self, preset: str, arm_id: Optional[str] = None):
+        if preset not in SPEED_PRESETS:
+            self._emit_error(f"未知速度预设: {preset}")
+            return
+        p = SPEED_PRESETS[preset]
+        self.set_speed(p["velocity"], p["accel"], p["decel"], arm_id)
+
+    def get_speed_params(self) -> Dict[str, float]:
+        with self._lock:
+            return dict(self.speed_params)
+
+    def enable_freedrive(self, arm_id: Optional[str] = None):
+        with self._lock:
+            for aid, runtime in self._get_target_arms(arm_id):
+                try:
+                    runtime.arm.disable()
+                    runtime.enabled = False
+                    for mid in runtime.motor_ids:
+                        runtime.motors[mid].enabled = False
+                except Exception as e:
+                    self._emit_error(f"{aid} 自由拖动启用失败: {e}")
+
+    def disable_freedrive(self, arm_id: Optional[str] = None):
+        with self._lock:
+            for aid, runtime in self._get_target_arms(arm_id):
+                try:
+                    runtime.arm.enable()
+                    runtime.enabled = True
+                    for mid in runtime.motor_ids:
+                        runtime.motors[mid].enabled = True
+                except Exception as e:
+                    self._emit_error(f"{aid} 自由拖动退出失败: {e}")
+
+    def calibrate_zero(self, arm_id: Optional[str] = None) -> Dict[str, Any]:
+        with self._lock:
+            results: Dict[str, Any] = {}
+            for aid, runtime in self._get_target_arms(arm_id):
+                try:
+                    runtime.arm.calibrate_zero()
+                    time.sleep(0.2)
+                    angles = runtime.arm.get_angles()
+                    runtime.zero_offsets = {mid: float(angles[i]) for i, mid in enumerate(runtime.motor_ids)}
+                    self._zero_offsets_all[aid] = dict(runtime.zero_offsets)
+                    results[aid] = "success"
+                except Exception as e:
+                    results[aid] = f"error: {e}"
+                    self._emit_error(f"{aid} 臂零点标定失败: {e}")
+            self._save_zero_offsets_all()
+            return results
+
+    def get_zero_offsets(self) -> Dict[str, Dict]:
+        with self._lock:
+            out: Dict[str, Dict] = {}
+            for aid in ("left", "right"):
+                runtime = self.arms.get(aid)
+                offsets = runtime.zero_offsets if runtime is not None else self._zero_offsets_all.get(aid, {})
+                out[aid] = {str(k): float(v) for k, v in offsets.items()}
+            return out
+
+    def record_point(self, name: str = None, arm_id: Optional[str] = None) -> Dict[str, Any]:
+        with self._lock:
+            self.read_positions()
+            point = {"name": name or f"point_{int(time.time())}", "timestamp": time.time(), "arms": {}}
+            for aid, runtime in self._get_target_arms(arm_id):
+                point["arms"][aid] = {str(mid): runtime.motors[mid].position for mid in runtime.motor_ids}
+            return point
+
+    def load_trajectory(self, filename: str) -> Optional[Dict]:
+        filepath = TRAJECTORIES_DIR / filename
+        if not filepath.exists():
+            self._emit_error(f"轨迹文件不存在: {filename}")
+            return None
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            self._emit_error(f"加载轨迹失败: {e}")
+            return None
+
+    def list_trajectories(self) -> List[str]:
+        if not TRAJECTORIES_DIR.exists():
+            return []
+        return [f.name for f in TRAJECTORIES_DIR.glob("*.json")]
+
+    def play_trajectory(self, filename: str, sync: bool = True, loop_override=None):
+        del sync
+        if self.playback.state == PlaybackState.PLAYING:
+            self._emit_error("已有轨迹正在播放")
+            return
+        trajectory = self.load_trajectory(filename)
+        if trajectory is None:
+            return
+        points = trajectory.get("points", [])
+        if not points:
+            self._emit_error("轨迹文件没有轨迹点")
+            return
+        loop = loop_override if loop_override is not None else trajectory.get("loop", False)
+        self._stop_playback.clear()
+        self._pause_playback.clear()
+        self.playback.state = PlaybackState.PLAYING
+        self.playback.trajectory_name = trajectory.get("name", filename)
+        self.playback.current_point = 0
+        self.playback.total_points = len(points)
+        self.playback.progress = 0.0
+        self._playback_thread = threading.Thread(
+            target=self._playback_worker,
+            args=(points, bool(loop), float(trajectory.get("speed_multiplier", 1.0))),
+            daemon=True,
+        )
+        self._playback_thread.start()
+
+    def _playback_worker(self, points: List[Dict], loop: bool, speed_mult: float):
+        try:
+            while True:
+                for i, point in enumerate(points):
+                    if self._stop_playback.is_set():
+                        break
+                    while self._pause_playback.is_set():
+                        if self._stop_playback.is_set():
+                            break
+                        time.sleep(0.05)
+                    if self._stop_playback.is_set():
+                        break
+                    self.playback.current_point = i + 1
+                    self.playback.progress = (i + 1) / len(points) * 100
+                    self._execute_point(point)
+                    if self._on_playback_progress:
+                        try:
+                            self._on_playback_progress(
+                                {
+                                    "current": i + 1,
+                                    "total": len(points),
+                                    "progress": self.playback.progress,
+                                    "point_name": point.get("name", ""),
+                                }
+                            )
+                        except Exception:
+                            pass
+                    time.sleep(max(0.0, float(point.get("delay", 1.0)) / max(speed_mult, 1e-6)))
+                if not loop or self._stop_playback.is_set():
+                    break
+                self.playback.current_point = 0
+                self.playback.progress = 0.0
+        except Exception as e:
+            self._emit_error(f"轨迹播放出错: {e}")
+        finally:
+            self.playback.state = PlaybackState.IDLE
+            if not self._stop_playback.is_set():
+                self.playback.progress = 100.0
+
+    def _execute_point(self, point: Dict):
+        positions = point.get("positions", {})
+        with self._lock:
+            for aid, runtime in self._get_target_arms():
+                try:
+                    target = runtime.arm.get_angles()
+                    updated = False
+                    for mid_str, pos in positions.items():
+                        mid = int(mid_str)
+                        if mid in runtime.motor_ids:
+                            target[runtime.motor_ids.index(mid)] = float(pos)
+                            updated = True
+                    if updated:
+                        runtime.arm.move_j(target, blocking=True)
+                        self._refresh_runtime_state(runtime)
+                except Exception as e:
+                    self._emit_error(f"{aid} 执行轨迹点失败: {e}")
+
+    def pause_playback(self):
+        if self.playback.state == PlaybackState.PLAYING:
+            self._pause_playback.set()
+            self.playback.state = PlaybackState.PAUSED
+
+    def resume_playback(self):
+        if self.playback.state == PlaybackState.PAUSED:
+            self._pause_playback.clear()
+            self.playback.state = PlaybackState.PLAYING
+
+    def stop_playback(self):
+        self._stop_playback.set()
+        self._pause_playback.clear()
+        self.playback.state = PlaybackState.STOPPING
+        if self._playback_thread and self._playback_thread.is_alive():
+            self._playback_thread.join(timeout=2.0)
+        self.playback.state = PlaybackState.IDLE
+
+    def set_target(self, target: str):
+        try:
+            self.target = ControlTarget(target)
+        except ValueError:
+            self._emit_error(f"无效的控制目标: {target}")
+
+    def cleanup(self):
+        self.stop_playback()
+        self.disconnect_all()
+
+
+_controller_instance: Optional[GroupController] = None
+
+
+def get_controller() -> GroupController:
+    global _controller_instance
+    if _controller_instance is None:
+        _controller_instance = GroupController()
+    return _controller_instance

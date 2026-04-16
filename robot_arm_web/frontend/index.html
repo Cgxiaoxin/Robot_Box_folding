@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>机械臂示教控制系统</title>
+    <link rel="stylesheet" href="css/style.css?v=3">
+</head>
+
+<body>
+    <!-- ==================== 头部 ==================== -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">🤖 机械臂示教控制</div>
+            <div class="status-indicator">
+                <span class="status-dot"></span>
+                <span class="status-text">未连接</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <select id="left-channel" class="trajectory-select" style="width: 90px;" title="右臂通道（程序内部 left）">
+                <option value="can0" selected>右臂 can0</option>
+                <option value="can1">右臂 can1</option>
+                <option value="can2">右臂 can2</option>
+                <option value="can3">右臂 can3</option>
+            </select>
+            <select id="right-channel" class="trajectory-select" style="width: 90px;" title="左臂通道（程序内部 right）">
+                <option value="can0">左臂 can0</option>
+                <option value="can1" selected>左臂 can1</option>
+                <option value="can2">左臂 can2</option>
+                <option value="can3">左臂 can3</option>
+            </select>
+            <button class="btn btn-primary" onclick="connectArms()">连接</button>
+            <button class="btn btn-outline" onclick="disconnectArms()">断开</button>
+            <button class="btn btn-success" onclick="initArms()">启动使能</button>
+            <button class="btn btn-warning" onclick="deactivateArms()">去使能</button>
+            <button class="btn btn-danger" onclick="disableArms()">关闭电机</button>
+            <button class="btn btn-emergency" onclick="emergencyStop()">⚠ 紧急停止</button>
+        </div>
+    </header>
+
+    <!-- ==================== 主容器 ==================== -->
+    <main class="main-container">
+        <div class="dashboard-grid">
+            
+            <!-- 场景展示区 (3D Viewer) -->
+            <div class="card" style="grid-area: viewer; padding: 0; display: flex; flex-direction: column; overflow: hidden;">
+                <div class="card-header" style="border-bottom: 1px solid var(--border-color); padding: 16px 24px; margin-bottom: 0;">
+                    <span class="card-title">3D模型预览</span>
+                </div>
+                <div class="card-body" style="padding: 0; min-height: 280px; background: var(--bg-dark); position: relative; flex: 1;">
+                    <div id="viewer3d-container" style="width: 100%; height: 100%; position: absolute; inset: 0;">
+                        <!-- Three.js Canvas 将挂载于此 -->
+                        <canvas id="viewer3d-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
+                        <div id="viewer3d-overlay" style="position: absolute; top: 10px; left: 10px; color: var(--gray-light); font-size: 12px; pointer-events: none;">
+                            urdf 可以加载吗？
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 轨迹播放区 -->
+        <div class="card" style="grid-area: playback;">
+            <div class="card-header">
+                <span class="card-title">🎬 轨迹播放</span>
+                <div class="flex gap-2">
+                    <select id="init-mode" class="trajectory-select" style="width: 120px;">
+                        <option value="4">位置模式</option>
+                        <option value="5" selected>轨迹位置模式</option>
+                    </select>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="playback-controls">
+                    <select id="trajectory-select" class="trajectory-select">
+                        <option value="">选择轨迹文件...</option>
+                    </select>
+                    <label class="loop-toggle" title="循环播放">
+                        <input type="checkbox" id="loop-toggle">
+                        <span class="loop-toggle-slider"></span>
+                        <span class="loop-toggle-label">🔁 循环</span>
+                    </label>
+                    <button id="btn-play" class="btn btn-success btn-large" onclick="resumeTrajectory()">
+                        ▶ 播放
+                    </button>
+                    <button id="btn-pause" class="btn btn-warning btn-large" onclick="pauseTrajectory()" disabled>
+                        ⏸ 暂停
+                    </button>
+                    <button id="btn-stop" class="btn btn-danger btn-large" onclick="stopTrajectory()" disabled>
+                        ⏹ 停止
+                    </button>
+                    <button class="btn btn-outline" onclick="goToZero()">
+                        🏠 回零
+                    </button>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill"></div>
+                    <span class="progress-text">就绪</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 预设动作区 -->
+        <div class="card" style="grid-area: preset;">
+            <div class="card-header">
+                <span class="card-title">🎯 预设动作</span>
+            </div>
+            <div class="card-body">
+                <div class="preset-grid">
+                    <button class="preset-btn" data-preset="A" onclick="playPreset('A')">
+                        <span class="preset-letter">A</span>
+                        <span class="preset-label">待机</span>
+                    </button>
+                    <button class="preset-btn" data-preset="B" onclick="playPreset('B')">
+                        <span class="preset-letter">B</span>
+                        <span class="preset-label">打鼓</span>
+                    </button>
+                    <button class="preset-btn" data-preset="C" onclick="playPreset('C')">
+                        <span class="preset-letter">C</span>
+                        <span class="preset-label">弹琴</span>
+                    </button>
+                    <button class="preset-btn" data-preset="D" onclick="playPreset('D')">
+                        <span class="preset-letter">D</span>
+                        <span class="preset-label">挥手</span>
+                    </button>
+                    <button class="preset-btn" data-preset="E" onclick="playPreset('E')">
+                        <span class="preset-letter">E</span>
+                        <span class="preset-label">鞠躬</span>
+                    </button>
+                    <button class="preset-btn" data-preset="F" onclick="playPreset('F')">
+                        <span class="preset-letter">F</span>
+                        <span class="preset-label">自定义</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 实时监控区 -->
+        <div class="card" style="grid-area: monitor;">
+            <div class="card-header">
+                <span class="card-title">📊 实时监控</span>
+            </div>
+            <div class="card-body">
+                <div class="monitor-grid">
+                    <!-- 右臂 (程序内部 left) -->
+                    <div class="arm-panel">
+                        <div class="arm-panel-header">
+                            <span id="left-arm-title" class="arm-title">右臂</span>
+                            <span id="left-arm-status" class="arm-status">未连接</span>
+                        </div>
+                        <table class="motor-table">
+                            <thead>
+                                <tr>
+                                    <th>电机</th>
+                                    <th>位置(rad)</th>
+                                    <th>角度</th>
+                                    <th>最小(rad)</th>
+                                    <th>最大(rad)</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody id="left-motors-tbody">
+                                <tr>
+                                    <td colspan="6" class="text-center">未连接</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- 左臂 (程序内部 right) -->
+                    <div class="arm-panel">
+                        <div class="arm-panel-header">
+                            <span id="right-arm-title" class="arm-title">左臂</span>
+                            <span id="right-arm-status" class="arm-status">未连接</span>
+                        </div>
+                        <table class="motor-table">
+                            <thead>
+                                <tr>
+                                    <th>电机</th>
+                                    <th>位置(rad)</th>
+                                    <th>角度</th>
+                                    <th>最小(rad)</th>
+                                    <th>最大(rad)</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody id="right-motors-tbody">
+                                <tr>
+                                    <td colspan="6" class="text-center">未连接</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 群控管理区 -->
+        <div class="card" style="grid-area: group;">
+            <div class="card-header">
+                <span class="card-title">🎮 群控管理</span>
+            </div>
+            <div class="card-body">
+                <div class="target-selector">
+                    <div class="target-option" data-target="left">
+                        <div class="target-icon">🦾</div>
+                        <div class="target-info">
+                            <strong>仅右臂</strong>
+                            <span class="target-sub">CAN0</span>
+                        </div>
+                        <div class="target-indicator"></div>
+                    </div>
+                    <div class="target-option" data-target="right">
+                        <div class="target-icon">🦾</div>
+                        <div class="target-info">
+                            <strong>仅左臂</strong>
+                            <span class="target-sub">CAN1</span>
+                        </div>
+                        <div class="target-indicator"></div>
+                    </div>
+                    <div class="target-option active" data-target="both">
+                        <div class="target-icon">⚙️</div>
+                        <div class="target-info">
+                            <strong>双臂同步</strong>
+                            <span class="target-sub">同时控制</span>
+                        </div>
+                        <div class="target-indicator"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab 切换区 -->
+        <div class="card" style="grid-area: manual;">
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="manual">手动控制</button>
+                <button class="tab-btn" data-tab="cartesian">笛卡尔控制</button>
+                <button class="tab-btn" data-tab="teaching">示教编程</button>
+                <button class="tab-btn" data-tab="speed">速度设置</button>
+                <button class="tab-btn" data-tab="log">系统日志</button>
+            </div>
+
+            <!-- 手动控制 Tab -->
+            <div id="tab-manual" class="tab-content active">
+                <div class="flex items-center gap-3 mb-3">
+                    <label>步长:</label>
+                    <select id="jog-step" class="trajectory-select" style="width: 100px;">
+                        <option value="0.01">0.01 rad</option>
+                        <option value="0.05">0.05 rad</option>
+                        <option value="0.1" selected>0.1 rad</option>
+                        <option value="0.5">0.5 rad</option>
+                        <option value="1.0">1.0 rad</option>
+                    </select>
+                    <button class="btn btn-warning" onclick="enableFreedrive()">启用拖拽示教</button>
+                    <button class="btn btn-outline" onclick="disableFreedrive()">退出拖拽示教</button>
+                    <span id="drag-teach-inline-status" style="color: var(--gray-light); font-size: 13px;">状态: idle</span>
+                </div>
+
+                <h4 class="mb-2">右臂控制</h4>
+                <div class="manual-control mb-3">
+                    <div class="motor-control" data-arm="left" data-motor="51">
+                        <div class="motor-label">关节 51</div>
+                        <div class="motor-position" id="pos-left-51">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="left" data-motor="51" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('left', 51, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('left', 51)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('left', 51, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="left" data-motor="52">
+                        <div class="motor-label">关节 52</div>
+                        <div class="motor-position" id="pos-left-52">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="left" data-motor="52" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('left', 52, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('left', 52)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('left', 52, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="left" data-motor="53">
+                        <div class="motor-label">关节 53</div>
+                        <div class="motor-position" id="pos-left-53">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="left" data-motor="53" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('left', 53, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('left', 53)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('left', 53, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="left" data-motor="54">
+                        <div class="motor-label">关节 54</div>
+                        <div class="motor-position" id="pos-left-54">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="left" data-motor="54" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('left', 54, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('left', 54)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('left', 54, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="left" data-motor="55">
+                        <div class="motor-label">关节 55</div>
+                        <div class="motor-position" id="pos-left-55">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="left" data-motor="55" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('left', 55, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('left', 55)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('left', 55, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="left" data-motor="56">
+                        <div class="motor-label">关节 56</div>
+                        <div class="motor-position" id="pos-left-56">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="left" data-motor="56" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('left', 56, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('left', 56)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('left', 56, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="left" data-motor="57">
+                        <div class="motor-label">关节 57</div>
+                        <div class="motor-position" id="pos-left-57">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="left" data-motor="57" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('left', 57, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('left', 57)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('left', 57, 1)">+</button>
+                        </div>
+                    </div>
+                </div>
+
+                <h4 class="mb-2">左臂控制</h4>
+                <div class="manual-control">
+                    <div class="motor-control" data-arm="right" data-motor="61">
+                        <div class="motor-label">关节 61</div>
+                        <div class="motor-position" id="pos-right-61">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="right" data-motor="61" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('right', 61, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('right', 61)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('right', 61, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="right" data-motor="62">
+                        <div class="motor-label">关节 62</div>
+                        <div class="motor-position" id="pos-right-62">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="right" data-motor="62" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('right', 62, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('right', 62)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('right', 62, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="right" data-motor="63">
+                        <div class="motor-label">关节 63</div>
+                        <div class="motor-position" id="pos-right-63">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="right" data-motor="63" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('right', 63, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('right', 63)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('right', 63, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="right" data-motor="64">
+                        <div class="motor-label">关节 64</div>
+                        <div class="motor-position" id="pos-right-64">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="right" data-motor="64" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('right', 64, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('right', 64)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('right', 64, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="right" data-motor="65">
+                        <div class="motor-label">关节 65</div>
+                        <div class="motor-position" id="pos-right-65">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="right" data-motor="65" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('right', 65, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('right', 65)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('right', 65, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="right" data-motor="66">
+                        <div class="motor-label">关节 66</div>
+                        <div class="motor-position" id="pos-right-66">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="right" data-motor="66" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('right', 66, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('right', 66)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('right', 66, 1)">+</button>
+                        </div>
+                    </div>
+                    <div class="motor-control" data-arm="right" data-motor="67">
+                        <div class="motor-label">关节 67</div>
+                        <div class="motor-position" id="pos-right-67">0.0000</div>
+                        <input class="joint-slider-small" type="range" data-arm="right" data-motor="67" min="-3.14"
+                            max="3.14" step="0.01" value="0">
+                        <div class="motor-buttons">
+                            <button class="motor-btn" onclick="jogMotor('right', 67, -1)">−</button>
+                            <button class="motor-btn zero" onclick="zeroMotor('right', 67)">0</button>
+                            <button class="motor-btn" onclick="jogMotor('right', 67, 1)">+</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 笛卡尔控制 Tab -->
+            <div id="tab-cartesian" class="tab-content">
+                <div class="flex items-center gap-3 mb-3">
+                    <label>控制臂:</label>
+                    <select id="cartesian-arm" class="trajectory-select" style="width: 120px;">
+                        <option value="left">右臂(51~57)</option>
+                        <option value="right">左臂(61~67)</option>
+                    </select>
+                    <label>Frame:</label>
+                    <select id="motion-frame" class="trajectory-select" style="width: 120px;">
+                        <option value="BASE" selected>BASE</option>
+                        <option value="TOOL">TOOL</option>
+                    </select>
+                    <span id="motion-state-indicator" class="arm-status">IDLE</span>
+                </div>
+
+                <div class="tabs" style="margin-bottom: 14px;">
+                    <button id="motion-mode-ptp" class="tab-btn active" onclick="setMotionMode('CARTESIAN_PTP')">点到点（PTP）</button>
+                    <button id="motion-mode-linear" class="tab-btn" onclick="setMotionMode('CARTESIAN_LINEAR')">直线（LINEAR）</button>
+                    <button id="motion-mode-jog" class="tab-btn" onclick="setMotionMode('CARTESIAN_JOG')">点动（JOG）</button>
+                </div>
+                <div id="motion-mode-desc" class="motion-mode-desc">PTP：末端不保证直线，适合快速到位。</div>
+
+                <div id="motion-pose-section" class="motion-pose-row">
+                    <div class="motion-pose-item"><label>X (mm)</label><input type="number" id="cart-target-x" value="0" step="1"></div>
+                    <div class="motion-pose-item"><label>Y (mm)</label><input type="number" id="cart-target-y" value="0" step="1"></div>
+                    <div class="motion-pose-item"><label>Z (mm)</label><input type="number" id="cart-target-z" value="0" step="1"></div>
+                    <div class="motion-pose-item"><label>Rx (deg)</label><input type="number" id="cart-target-rx" value="0" step="0.1"></div>
+                    <div class="motion-pose-item"><label>Ry (deg)</label><input type="number" id="cart-target-ry" value="0" step="0.1"></div>
+                    <div class="motion-pose-item"><label>Rz (deg)</label><input type="number" id="cart-target-rz" value="0" step="0.1"></div>
+                </div>
+
+                <h4 class="mb-2 mt-3">约束参数</h4>
+                <div class="cartesian-absolute">
+                    <div class="input-group"><label>线速度(m/s)</label><input type="number" id="motion-max-vel" value="0.05" step="0.01"></div>
+                    <div class="input-group"><label>线加速度(m/s²)</label><input type="number" id="motion-max-acc" value="0.10" step="0.01"></div>
+                    <div class="input-group"><label>角速度(rad/s)</label><input type="number" id="motion-max-ang-vel" value="0.30" step="0.01"></div>
+                    <div class="input-group"><label>角加速度(rad/s²)</label><input type="number" id="motion-max-ang-acc" value="0.10" step="0.01"></div>
+                    <button class="btn btn-outline" onclick="resetMotionConstraints()">恢复默认</button>
+                </div>
+
+                <h4 class="mb-2 mt-3">执行控制</h4>
+                <div class="flex gap-3">
+                    <button id="btn-motion-exec" class="btn btn-success" onclick="executeMotion()">执行目标位姿</button>
+                    <button id="btn-motion-pause" class="btn btn-warning" onclick="pauseMotion()" disabled>暂停</button>
+                    <button id="btn-motion-resume" class="btn btn-primary" onclick="resumeMotion()" disabled>继续</button>
+                    <button id="btn-motion-cancel" class="btn btn-danger" onclick="cancelMotion()" disabled>取消</button>
+                    <button class="btn btn-emergency" onclick="emergencyStop()">急停</button>
+                </div>
+
+                <h4 id="motion-jog-title" class="mb-2 mt-3">Jog 点动（长按连续）</h4>
+                <div id="motion-jog-controls" class="flex items-center gap-3 mb-2">
+                    <label>位置步长:</label>
+                    <select id="cartesian-step-mm" class="trajectory-select" style="width: 120px;">
+                        <option value="1">1 mm</option>
+                        <option value="2">2 mm</option>
+                        <option value="5" selected>5 mm</option>
+                        <option value="10">10 mm</option>
+                        <option value="20">20 mm</option>
+                    </select>
+                    <label>姿态步长:</label>
+                    <select id="cartesian-step-deg" class="trajectory-select" style="width: 120px;">
+                        <option value="0.5">0.5 deg</option>
+                        <option value="1" selected>1 deg</option>
+                        <option value="2">2 deg</option>
+                        <option value="5">5 deg</option>
+                    </select>
+                </div>
+                <div id="motion-jog-grid" class="cartesian-jog-grid">
+                    <div class="jog-axis"><div class="jog-axis-label">X</div><div class="jog-axis-buttons"><button class="btn btn-outline jog-hold-btn" data-axis="x" data-sign="-1">-X</button><button class="btn btn-outline jog-hold-btn" data-axis="x" data-sign="1">+X</button></div></div>
+                    <div class="jog-axis"><div class="jog-axis-label">Y</div><div class="jog-axis-buttons"><button class="btn btn-outline jog-hold-btn" data-axis="y" data-sign="-1">-Y</button><button class="btn btn-outline jog-hold-btn" data-axis="y" data-sign="1">+Y</button></div></div>
+                    <div class="jog-axis"><div class="jog-axis-label">Z</div><div class="jog-axis-buttons"><button class="btn btn-outline jog-hold-btn" data-axis="z" data-sign="-1">-Z</button><button class="btn btn-outline jog-hold-btn" data-axis="z" data-sign="1">+Z</button></div></div>
+                    <div class="jog-axis"><div class="jog-axis-label">Rx</div><div class="jog-axis-buttons"><button class="btn btn-outline jog-hold-btn" data-axis="rx" data-sign="-1">-Rx</button><button class="btn btn-outline jog-hold-btn" data-axis="rx" data-sign="1">+Rx</button></div></div>
+                    <div class="jog-axis"><div class="jog-axis-label">Ry</div><div class="jog-axis-buttons"><button class="btn btn-outline jog-hold-btn" data-axis="ry" data-sign="-1">-Ry</button><button class="btn btn-outline jog-hold-btn" data-axis="ry" data-sign="1">+Ry</button></div></div>
+                    <div class="jog-axis"><div class="jog-axis-label">Rz</div><div class="jog-axis-buttons"><button class="btn btn-outline jog-hold-btn" data-axis="rz" data-sign="-1">-Rz</button><button class="btn btn-outline jog-hold-btn" data-axis="rz" data-sign="1">+Rz</button></div></div>
+                </div>
+
+                <h4 class="mb-2 mt-3">反馈区</h4>
+                <div class="progress-bar">
+                    <div id="motion-progress-fill" class="progress-fill"></div>
+                    <span id="motion-progress-text" class="progress-text">就绪</span>
+                </div>
+                <div class="mt-2" style="color: var(--gray-light); font-size: 13px;">
+                    当前Pose(mm/deg): <span id="motion-current-pose">-</span> |
+                    目标Pose(mm/deg): <span id="motion-target-pose">-</span> |
+                    误差: <span id="motion-error-text">-</span>
+                </div>
+                <div class="mt-2" style="color: var(--gray-light); font-size: 13px;">
+                    双臂实时Pose(mm/deg): <span id="motion-live-both">-</span>
+                </div>
+                <div class="mt-1" style="color: var(--gray); font-size: 12px;">
+                    实时流: <span id="motion-live-meta">-</span>
+                </div>
+                <div class="mt-2" style="color: var(--warning); font-size: 13px;">
+                    最近错误: <span id="motion-last-error">无</span>
+                </div>
+            </div>
+
+            <!-- 示教编程 Tab -->
+            <div id="tab-teaching" class="tab-content">
+                <h4 class="mb-2">零点标定</h4>
+                <div class="flex gap-3 mb-3">
+                    <button class="btn btn-primary" onclick="calibrateZero()">🎯 标定当前位置为零点</button>
+                    <button class="btn btn-outline" onclick="goToZero()">🏠 回到零点位置</button>
+                    <button class="btn btn-outline" onclick="loadZeroOffset()">📥 查看零点偏移</button>
+                </div>
+                <div class="zero-display mb-3">
+                    <div class="zero-panel">
+                        <div class="zero-title">zero_arm0（右臂）</div>
+                        <div id="zero-left-list" class="zero-list">未加载</div>
+                    </div>
+                    <div class="zero-panel">
+                        <div class="zero-title">zero_arm1（左臂）</div>
+                        <div id="zero-right-list" class="zero-list">未加载</div>
+                    </div>
+                </div>
+                <div class="zero-meta">
+                    <span id="zero-calib-status" class="zero-status"></span>
+                    <span class="zero-updated">最后更新：<span id="zero-last-updated">-</span></span>
+                </div>
+                <div class="mt-3" style="color: var(--gray-light);">
+                    <p>
+                        <strong>零点标定流程：</strong><br>
+                        1. 使用"自由拖动"模式手动移动机械臂到物理零点位置<br>
+                        2. 点击"标定当前位置为零点"保存零点<br>
+                        3. 之后所有位置都相对于这个零点
+                    </p>
+                </div>
+
+                <hr style="margin: 20px 0; border-color: var(--gray);">
+
+                <h4 class="mb-2">Drag Teach 录制</h4>
+                <div class="traj-meta-row">
+                    <div class="input-group">
+                        <label>状态:</label>
+                        <div id="drag-teach-status">idle</div>
+                    </div>
+                    <div class="input-group">
+                        <label>控制源:</label>
+                        <div id="drag-teach-source">pp_fallback</div>
+                    </div>
+                    <div class="input-group">
+                        <label>当前段:</label>
+                        <div id="drag-teach-current-segment">-</div>
+                    </div>
+                    <div class="input-group">
+                        <label>已录点数:</label>
+                        <div id="drag-teach-point-count">0</div>
+                    </div>
+                </div>
+                <div class="traj-record-bar">
+                    <input type="text" id="drag-segment-name" placeholder="segment 名称，如 press_edge" style="flex:1;">
+                    <input type="text" id="drag-segment-desc" placeholder="segment 描述（可选）" style="flex:1;">
+                    <select id="drag-segment-sample-type" class="trajectory-select" style="width: 140px;">
+                        <option value="keyframe" selected>关键帧段</option>
+                        <option value="stream">连续流段</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="dragTeachStartSegment()">开始段录制</button>
+                    <button class="btn btn-success" onclick="dragTeachRecordKeyframe()">记录关键帧</button>
+                    <button class="btn btn-outline" onclick="dragTeachRemoveLastPoint()">删除上一点</button>
+                    <button class="btn btn-success" onclick="dragTeachStopSegment()">保存段</button>
+                    <button class="btn btn-danger" onclick="dragTeachCancelSegment()">取消段</button>
+                </div>
+                <div class="traj-record-bar">
+                    <div class="input-group" style="margin-bottom: 0;">
+                        <label>关键帧延迟:</label>
+                        <input type="number" id="drag-keyframe-delay" value="1.0" step="0.1" min="0" style="width:70px;">
+                        <span style="color:var(--gray-light);font-size:12px;">s</span>
+                    </div>
+                    <button class="btn btn-outline" onclick="dragTeachListSegments()">刷新 Drag 段列表</button>
+                    <span id="drag-teach-session-hint" style="color: var(--gray-light); font-size: 13px;">可先启用拖拽示教，再开始录制段。</span>
+                </div>
+
+                <h4 class="mb-2">轨迹管理</h4>
+                <div class="flex gap-3 mb-3">
+                    <button class="btn btn-success" onclick="trajectoryNewPrompt()">📝 新建轨迹</button>
+                    <button class="btn btn-outline" onclick="trajectoryListAndLoad()">📂 加载轨迹</button>
+                    <button class="btn btn-outline" onclick="trajectoryListAndDelete()">🗑️ 删除轨迹</button>
+                    <button class="btn btn-outline" onclick="trajectoryRefreshList()">🔄 刷新列表</button>
+                </div>
+
+                <!-- 轨迹文件列表 (动态显示) -->
+                <div id="traj-file-list" class="traj-file-list hidden"></div>
+
+                <!-- 轨迹编辑区 -->
+                <div id="traj-editor" class="trajectory-editor hidden">
+                    <div class="traj-editor-header">
+                        <h4 id="traj-editor-title">编辑轨迹</h4>
+                        <button class="btn btn-outline btn-sm" onclick="trajectoryCloseEdit()">✕ 关闭</button>
+                    </div>
+
+                    <div class="traj-meta-row">
+                        <div class="input-group">
+                            <label>名称:</label>
+                            <input type="text" id="traj-edit-name" placeholder="轨迹名称">
+                        </div>
+                        <div class="input-group">
+                            <label>描述:</label>
+                            <input type="text" id="traj-edit-desc" placeholder="可选描述...">
+                        </div>
+                    </div>
+                    <div class="traj-meta-row">
+                        <div class="input-group">
+                            <label>
+                                <input type="checkbox" id="traj-edit-loop"> 循环播放
+                            </label>
+                        </div>
+                        <div class="input-group">
+                            <label>速度倍率:</label>
+                            <input type="number" id="traj-edit-speed" value="1.0" step="0.1" min="0.1" max="5.0"
+                                style="width:80px;">
+                        </div>
+                    </div>
+
+                    <!-- 点位列表 -->
+                    <div class="traj-point-list-header">
+                        <span>点位列表</span>
+                        <span id="traj-point-count">0 个点位</span>
+                    </div>
+                    <div id="traj-point-list" class="traj-point-list">
+                        <div class="traj-empty-hint">暂无点位, 请使用下方按钮记录</div>
+                    </div>
+
+                    <!-- 记录点位 -->
+                    <div class="traj-record-bar">
+                        <input type="text" id="traj-point-name" placeholder="点位名称 (可选)" style="flex:1;">
+                        <div class="input-group" style="margin-bottom:0;">
+                            <label>延迟:</label>
+                            <input type="number" id="traj-point-delay" value="1.0" step="0.1" min="0"
+                                style="width:70px;">
+                            <span style="color:var(--gray-light);font-size:12px;">s</span>
+                        </div>
+                        <button class="btn btn-success" onclick="trajectoryAddPoint()">📍 记录当前位置</button>
+                    </div>
+
+                    <!-- 保存按钮 -->
+                    <div class="flex gap-3 mt-3">
+                        <button class="btn btn-primary" onclick="trajectorySave()">💾 保存轨迹</button>
+                        <button class="btn btn-outline" onclick="trajectoryPreview()">▶ 预览播放</button>
+                    </div>
+                </div>
+
+                <div class="mt-3" style="color: var(--gray-light); font-size: 13px;">
+                    <strong>示教流程：</strong>
+                    1. 新建/加载轨迹 →
+                    2. 拖动机械臂到目标位(自由拖动或手动控制) →
+                    3. 记录当前位置 →
+                    4. 重复2-3 →
+                    5. 保存轨迹 →
+                    6. 在播放区选择播放
+                </div>
+            </div>
+
+            <!-- 速度设置 Tab -->
+            <div id="tab-speed" class="tab-content">
+                <div class="flex gap-3 mb-3">
+                    <button class="btn btn-outline" onclick="setSpeed('very_slow')">极慢 (0.2)</button>
+                    <button class="btn btn-outline" onclick="setSpeed('slow')">慢速 (0.5)</button>
+                    <button class="btn btn-primary" onclick="setSpeed('medium')">中速 (1.0)</button>
+                    <button class="btn btn-warning" onclick="setSpeed('fast')">快速 (2.0)</button>
+                </div>
+                <div class="speed-slider-wrap mb-3">
+                    <div class="speed-slider-row">
+                        <label style="min-width: 80px;">速度滑杆:</label>
+                        <input id="speed-slider" type="range" min="0" max="2.0" step="0.01" value="0.5"
+                            class="speed-slider">
+                        <div class="speed-slider-value">
+                            <span id="speed-slider-value">0.50</span>
+                            <span style="opacity: 0.85;">rad/s</span>
+                        </div>
+                    </div>
+                    <div class="speed-slider-meta">
+                        当前速度：<span id="speed-current">0.50</span> rad/s（范围：<span id="speed-min">0</span> ~ <span
+                            id="speed-max">2.0</span>）
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <h4 class="mb-2">自定义速度</h4>
+                    <div class="flex gap-3 flex-wrap">
+                        <div class="input-group" style="flex: 1;">
+                            <label>速度:</label>
+                            <input type="number" id="speed-velocity" value="0.5" step="0.1" min="0.1" max="5.0">
+                            <span>rad/s</span>
+                        </div>
+                        <div class="input-group" style="flex: 1;">
+                            <label>加速度:</label>
+                            <input type="number" id="speed-accel" value="0.5" step="0.1" min="0.1" max="5.0">
+                            <span>rad/s²</span>
+                        </div>
+                        <div class="input-group" style="flex: 1;">
+                            <label>减速度:</label>
+                            <input type="number" id="speed-decel" value="0.5" step="0.1" min="0.1" max="5.0">
+                            <span>rad/s²</span>
+                        </div>
+                        <button class="btn btn-success" onclick="setCustomSpeed()">应用</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 系统日志 Tab -->
+            <div id="tab-log" class="tab-content">
+                <div class="flex justify-between items-center mb-2">
+                    <span style="color: var(--gray-light);">系统日志</span>
+                    <button class="btn btn-outline" onclick="clearLog()"
+                        style="padding: 4px 12px; min-height: 32px;">清空</button>
+                </div>
+                <div id="log-container" class="log-container">
+                    <!-- 日志条目将动态添加 -->
+                </div>
+            </div>
+        </div>
+
+        </div> <!-- End dashboard-grid -->
+    </main>
+
+    <!-- Socket.IO 客户端 -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    
+    <!-- Three.js & URDFLoader Import Map -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://esm.sh/three@0.160.0",
+            "three/addons/": "https://esm.sh/three@0.160.0/examples/jsm/",
+            "urdf-loader": "https://esm.sh/urdf-loader@0.12.1"
+        }
+    }
+    </script>
+    
+    <!-- 3D Viewer Logic -->
+    <script type="module" src="js/viewer3d.js?v=4"></script>
+    
+    <!-- 主逻辑 -->
+    <script src="js/main.js?v=3"></script>
+</body>
+
+</html>

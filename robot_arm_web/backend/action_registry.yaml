@@ -1,0 +1,52 @@
+version: 1
+actions:
+  reach_pregrasp:
+    sync_policy: arm_then_hand
+    timeout_ms: 8000
+    arm_plan:
+      motion_type: CARTESIAN_PTP
+      frame: BASE
+      pose:
+        x: 0.30
+        y: 0.15
+        z: 0.30
+        rx: 0.0
+        ry: 1.57
+        rz: 0.0
+      constraints:
+        max_velocity: 0.25
+        max_acceleration: 0.40
+    hand_plan:
+      pose_0_255: [200, 255, 255, 255, 255, 180]
+      speed_0_255: [120, 160, 160, 160, 160, 140]
+      torque_0_255: [220, 220, 220, 220, 220, 200]
+      sleep_ms: 50
+    postconditions:
+      - key: arm_pose_reached
+        op: eq
+        value: true
+    safe_abort_action: retreat_to_safe_pose
+
+  hand_close_soft:
+    sync_policy: hand_then_arm
+    timeout_ms: 5000
+    arm_plan:
+      motion_type: CARTESIAN_PTP
+      frame: BASE
+      pose:
+        x: 0.30
+        y: 0.15
+        z: 0.28
+      constraints:
+        max_velocity: 0.10
+        max_acceleration: 0.20
+    hand_plan:
+      pose_0_255: [120, 90, 255, 255, 255, 180]
+      speed_0_255: [90, 90, 160, 160, 160, 120]
+      torque_0_255: [180, 180, 220, 220, 220, 180]
+      sleep_ms: 80
+    postconditions:
+      - key: grasp_contact
+        op: eq
+        value: true
+    safe_abort_action: hand_open_relaxed
