@@ -4,36 +4,82 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>机械臂3D可视化</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg-page: #f6f1e8;
+            --bg-panel: rgba(255, 253, 248, 0.92);
+            --bg-soft: #ebe4d7;
+            --bg-canvas: linear-gradient(180deg, #f9f5ee 0%, #efe6d8 100%);
+            --border: rgba(122, 102, 75, 0.16);
+            --text: #31281f;
+            --muted: #7e6f5f;
+            --primary: #c96f42;
+            --primary-soft: #f5d7c7;
+            --accent: #5f8a7a;
+            --shadow: 0 24px 60px rgba(88, 70, 47, 0.12);
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
-        .container { display: flex; height: 100vh; }
-        #canvas-container { flex: 1; position: relative; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); }
+        body {
+            font-family: "Manrope", "PingFang SC", sans-serif;
+            background:
+                radial-gradient(circle at top left, rgba(227, 199, 159, 0.55), transparent 34%),
+                linear-gradient(180deg, #fbf8f2 0%, var(--bg-page) 100%);
+            color: var(--text);
+            overflow: hidden;
+        }
+        .container { display: flex; height: 100vh; padding: 18px; gap: 18px; }
+        #canvas-container {
+            flex: 1;
+            position: relative;
+            background: var(--bg-canvas);
+            border: 1px solid var(--border);
+            border-radius: 28px;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
         #canvas-container canvas { width: 100% !important; height: 100% !important; }
-        .sidebar { width: 320px; background: #16213e; padding: 20px; overflow-y: auto; border-left: 1px solid #0f3460; }
-        .sidebar h2 { font-size: 18px; margin-bottom: 20px; color: #4ecdc4; }
-        .panel { background: #1a1a2e; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
-        .panel-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: #4ecdc4; }
+        .sidebar {
+            width: 332px;
+            background: var(--bg-panel);
+            padding: 22px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            border-radius: 28px;
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(14px);
+        }
+        .sidebar h2 { font-size: 20px; margin-bottom: 20px; color: var(--text); letter-spacing: -0.02em; }
+        .panel {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(122, 102, 75, 0.12);
+            border-radius: 20px;
+            padding: 16px;
+            margin-bottom: 15px;
+        }
+        .panel-title { font-size: 13px; font-weight: 700; margin-bottom: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
         .joint-control { display: flex; align-items: center; margin-bottom: 10px; }
-        .joint-label { width: 50px; font-size: 12px; color: #888; }
-        .joint-slider { flex: 1; -webkit-appearance: none; height: 6px; background: #0f3460; border-radius: 3px; outline: none; }
-        .joint-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; background: #4ecdc4; border-radius: 50%; cursor: pointer; }
-        .joint-value { width: 50px; text-align: right; font-size: 12px; font-family: monospace; }
+        .joint-label { width: 50px; font-size: 12px; color: var(--muted); }
+        .joint-slider { flex: 1; -webkit-appearance: none; height: 7px; background: #dfd1bf; border-radius: 999px; outline: none; }
+        .joint-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 15px; height: 15px; background: var(--primary); border-radius: 50%; cursor: pointer; box-shadow: 0 3px 10px rgba(201, 111, 66, 0.32); }
+        .joint-value { width: 50px; text-align: right; font-size: 12px; font-family: "IBM Plex Mono", monospace; color: var(--text); }
         .btn-row { display: flex; gap: 10px; margin-top: 10px; }
-        .btn { flex: 1; padding: 8px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
-        .btn-primary { background: #4ecdc4; color: #1a1a2e; }
-        .btn-secondary { background: #0f3460; color: #eee; }
-        .status-indicator { display: flex; align-items: center; gap: 8px; padding: 10px; background: #0f3460; border-radius: 4px; margin-bottom: 15px; }
-        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #e74c3c; }
-        .status-dot.connected { background: #2ecc71; }
-        .info-row { display: flex; justify-content: space-between; font-size: 12px; padding: 5px 0; border-bottom: 1px solid #0f3460; }
-        .info-label { color: #888; }
-        .info-value { color: #4ecdc4; font-family: monospace; }
+        .btn { flex: 1; padding: 10px 12px; border: 1px solid transparent; border-radius: 14px; cursor: pointer; font-size: 12px; font-weight: 700; transition: all 0.2s; }
+        .btn-primary { background: var(--primary); color: #fffaf6; box-shadow: 0 10px 18px rgba(201, 111, 66, 0.25); }
+        .btn-secondary { background: #fffaf3; color: var(--text); border-color: rgba(122, 102, 75, 0.16); }
+        .status-indicator { display: flex; align-items: center; gap: 8px; padding: 12px; background: rgba(255, 255, 255, 0.72); border: 1px solid rgba(122, 102, 75, 0.12); border-radius: 16px; margin-bottom: 15px; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #d0615f; }
+        .status-dot.connected { background: #4f9d78; }
+        .info-row { display: flex; justify-content: space-between; font-size: 12px; padding: 7px 0; border-bottom: 1px solid rgba(122, 102, 75, 0.1); }
+        .info-label { color: var(--muted); }
+        .info-value { color: var(--primary); font-family: "IBM Plex Mono", monospace; }
         .view-controls { display: flex; gap: 5px; }
-        .view-btn { padding: 5px 10px; background: #0f3460; border: none; border-radius: 4px; color: #888; cursor: pointer; font-size: 11px; }
-        .view-btn.active { background: #4ecdc4; color: #1a1a2e; }
-        .loading-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(26, 26, 46, 0.9); display: flex; align-items: center; justify-content: center; flex-direction: column; z-index: 100; }
-        .loading-spinner { width: 40px; height: 40px; border: 3px solid #0f3460; border-top-color: #4ecdc4; border-radius: 50%; animation: spin 1s linear infinite; }
+        .view-btn { padding: 7px 11px; background: #fffaf3; border: 1px solid rgba(122, 102, 75, 0.14); border-radius: 12px; color: var(--muted); cursor: pointer; font-size: 11px; font-weight: 700; }
+        .view-btn.active { background: var(--primary-soft); color: #8f4b2a; border-color: rgba(201, 111, 66, 0.22); }
+        .loading-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(249, 243, 234, 0.82); display: flex; align-items: center; justify-content: center; flex-direction: column; z-index: 100; backdrop-filter: blur(8px); }
+        .loading-spinner { width: 40px; height: 40px; border: 3px solid #deccb4; border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .hidden { display: none !important; }
     </style>
@@ -47,7 +93,7 @@
             </div>
         </div>
         <div class="sidebar">
-            <h2>🎯 机械臂3D视图</h2>
+            <h2>机械臂 3D 视图</h2>
             <div class="status-indicator">
                 <span class="status-dot" id="status-dot"></span>
                 <span id="status-text">未连接</span>
@@ -93,7 +139,7 @@
         
         function init() {
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x1a1a2e);
+            scene.background = new THREE.Color(0xf5ede2);
             const container = document.getElementById('canvas-container');
             camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 1000);
             camera.position.set(2, 1.5, 2);
@@ -103,12 +149,15 @@
             renderer.setPixelRatio(window.devicePixelRatio);
             container.appendChild(renderer.domElement);
             
-            scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+            const dirLight = new THREE.DirectionalLight(0xfffbf4, 1.05);
             dirLight.position.set(5, 10, 5);
             scene.add(dirLight);
+            const fillLight = new THREE.DirectionalLight(0xf1caa8, 0.5);
+            fillLight.position.set(-5, 3, -5);
+            scene.add(fillLight);
             
-            const grid = new THREE.GridHelper(2, 20, 0x0f3460, 0x0f3460);
+            const grid = new THREE.GridHelper(2, 20, 0xcdb8a0, 0xe8dccd);
             scene.add(grid);
             
             leftArm = createArm(-0.3);

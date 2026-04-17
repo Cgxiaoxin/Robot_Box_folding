@@ -16,10 +16,10 @@ class Viewer3D {
         }
 
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x0f172a); // Match slate-900 theme
+        this.scene.background = new THREE.Color(0xf4ede2);
         
         // Add subtle fog to blend into background
-        this.scene.fog = new THREE.FogExp2(0x0f172a, 0.05);
+        this.scene.fog = new THREE.FogExp2(0xf4ede2, 0.035);
 
         // Camera
         this.camera = new THREE.PerspectiveCamera(
@@ -52,7 +52,7 @@ class Viewer3D {
         this.setupLighting();
 
         // Floor / Grid
-        const gridHelper = new THREE.GridHelper(5, 50, 0x334155, 0x1e293b);
+        const gridHelper = new THREE.GridHelper(5, 50, 0xcdb8a0, 0xe8dccd);
         gridHelper.position.y = -0.01;
         this.scene.add(gridHelper);
 
@@ -84,19 +84,23 @@ class Viewer3D {
     }
 
     setupLighting() {
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
         this.scene.add(ambientLight);
 
-        const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+        const dirLight = new THREE.DirectionalLight(0xfffbf4, 1.25);
         dirLight.position.set(5, 10, 5);
         dirLight.castShadow = true;
         dirLight.shadow.mapSize.width = 2048;
         dirLight.shadow.mapSize.height = 2048;
         this.scene.add(dirLight);
 
-        const fillLight = new THREE.DirectionalLight(0x90b0d0, 0.5);
+        const fillLight = new THREE.DirectionalLight(0xf1caa8, 0.6);
         fillLight.position.set(-5, 3, -5);
         this.scene.add(fillLight);
+
+        const rimLight = new THREE.DirectionalLight(0xc7e1d6, 0.35);
+        rimLight.position.set(3, 2, -4);
+        this.scene.add(rimLight);
     }
 
     initLoader() {
@@ -129,10 +133,10 @@ class Viewer3D {
                         c.castShadow = true;
                         c.receiveShadow = true;
                         
-                        // Improve material properties for the dark slate theme
+                        // Brighten the model slightly for the light canvas theme.
                         if(c.material) {
-                            c.material.roughness = 0.4;
-                            c.material.metalness = 0.2;
+                            c.material.roughness = 0.48;
+                            c.material.metalness = 0.12;
                         }
                     }
                 });

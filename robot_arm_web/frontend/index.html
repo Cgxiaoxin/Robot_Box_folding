@@ -5,6 +5,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>机械臂示教控制系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/style.css?v=3">
 </head>
 
@@ -12,7 +15,13 @@
     <!-- ==================== 头部 ==================== -->
     <header class="header">
         <div class="header-left">
-            <div class="logo">🤖 机械臂示教控制</div>
+            <div class="logo">
+                <span class="logo-mark">RB</span>
+                <div class="logo-copy">
+                    <strong>机械臂示教控制</strong>
+                    <span>Robot Box Folding Console</span>
+                </div>
+            </div>
             <div class="status-indicator">
                 <span class="status-dot"></span>
                 <span class="status-text">未连接</span>
@@ -45,15 +54,15 @@
         <div class="dashboard-grid">
             
             <!-- 场景展示区 (3D Viewer) -->
-            <div class="card" style="grid-area: viewer; padding: 0; display: flex; flex-direction: column; overflow: hidden;">
-                <div class="card-header" style="border-bottom: 1px solid var(--border-color); padding: 16px 24px; margin-bottom: 0;">
+            <div class="card viewer-card" style="grid-area: viewer;">
+                <div class="card-header viewer-card-header">
                     <span class="card-title">3D模型预览</span>
                 </div>
-                <div class="card-body" style="padding: 0; min-height: 280px; background: var(--bg-dark); position: relative; flex: 1;">
-                    <div id="viewer3d-container" style="width: 100%; height: 100%; position: absolute; inset: 0;">
+                <div class="card-body viewer-card-body">
+                    <div id="viewer3d-container" class="viewer3d-container">
                         <!-- Three.js Canvas 将挂载于此 -->
-                        <canvas id="viewer3d-canvas" style="width: 100%; height: 100%; display: block;"></canvas>
-                        <div id="viewer3d-overlay" style="position: absolute; top: 10px; left: 10px; color: var(--gray-light); font-size: 12px; pointer-events: none;">
+                        <canvas id="viewer3d-canvas" class="viewer3d-canvas"></canvas>
+                        <div id="viewer3d-overlay" class="viewer3d-overlay">
                             urdf 可以加载吗？
                         </div>
                     </div>
