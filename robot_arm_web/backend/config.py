@@ -58,7 +58,7 @@ TRAJECTORY_START_ALIGN_TOLERANCE_RAD = float(os.getenv("TRAJECTORY_START_ALIGN_T
 TRAJECTORY_START_MAX_DEVIATION_RAD = float(os.getenv("TRAJECTORY_START_MAX_DEVIATION_RAD", "0.12"))
 
 # 统一安全恢复参数
-# 急停安全恢复相关参数
+# 急停安全恢复相关参数 **
 SAFE_RECOVERY_VELOCITY = float(os.getenv("SAFE_RECOVERY_VELOCITY", "0.15"))  # 恢复初始速度（关节/s）
 SAFE_RECOVERY_ACCEL = float(os.getenv("SAFE_RECOVERY_ACCEL", "0.3"))         # 恢复初始加速度
 SAFE_RECOVERY_SETTLE_S = float(os.getenv("SAFE_RECOVERY_SETTLE_S", "0.5"))  # 初始持位后等待时间（秒）

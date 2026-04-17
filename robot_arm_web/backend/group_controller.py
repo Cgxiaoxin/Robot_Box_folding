@@ -302,6 +302,15 @@ class GroupController:
     def _blend_scalar(self, start: float, end: float, alpha: float) -> float:
         return float(start + (end - start) * alpha)
 
+    # 安全恢复机械臂
+    # 主要逻辑：
+    # - 检查目标机械臂是否已连接；
+    # - 设置为 PP 控制模式，并使能；
+    # - 设置全局运动速度参数；
+    # - 如果启用了自动回零（home），则执行归零操作；
+    # - 如果处于“急停恢复”场景（recovery_hold_required=True），
+    #   通过统一安全恢复入口先低速持位、再渐进恢复常规速度，并清除该标记；
+    # - 最后刷新本地机械臂状态。
     def safe_recover_arm(
         self,
         arm_id: str,
