@@ -14,9 +14,9 @@ from typing import Any, Callable, Dict, List, Optional
 if __package__ is None or __package__ == "":
     project_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(project_root))
-    from robot_arm_web.backend.config import TRAJECTORIES_DIR
+    from robot_arm_web.backend.config import SAFE_RECOVERY_PID_SCALE, TRAJECTORIES_DIR
 else:
-    from .config import TRAJECTORIES_DIR
+    from .config import SAFE_RECOVERY_PID_SCALE, TRAJECTORIES_DIR
 
 
 def flatten_record_point_to_positions(point_data: Dict[str, Any]) -> Dict[str, float]:
@@ -86,24 +86,24 @@ class DragTeachArmState:
 
 @dataclass
 class DragTeachSession:
-    session_id: str
-    name: str
-    arm_id: Optional[str]
-    arm_scope: List[str]
-    description: str = ""
-    segment_type: str = "generic"
-    sample_type: str = "keyframe"
-    record_mode: str = "drag_keyframe"
-    points: List[Dict[str, Any]] = field(default_factory=list)
-    hand_timeline: List[Dict[str, Any]] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    speed_multiplier: float = 1.0
-    loop: bool = False
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    filename: Optional[str] = None
-    last_record_ts: float = 0.0
-    stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
-    stream_thread: Optional[threading.Thread] = field(default=None, repr=False)
+    session_id: str                 # 会话唯一ID
+    name: str                       # 会话名/段名
+    arm_id: Optional[str]           # 关联的单侧机械臂ID
+    arm_scope: List[str]            # 关联臂的作用域（left/right/双臂等，可多臂录制）
+    description: str = ""           # 描述
+    segment_type: str = "generic"   # 段类型标签
+    sample_type: str = "keyframe"   # 采样类型（关键帧、stream流式）
+    record_mode: str = "drag_keyframe"  # 录制模式（如拖动关键帧/流式等）
+    points: List[Dict[str, Any]] = field(default_factory=list)    # 录制的轨迹点列表
+    hand_timeline: List[Dict[str, Any]] = field(default_factory=list)  # 手部同步动作时序
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())  # 创建时间
+    speed_multiplier: float = 1.0   # 回放速度倍率
+    loop: bool = False              # 是否循环
+    metadata: Dict[str, Any] = field(default_factory=dict)     # 额外元数据
+    filename: Optional[str] = None  # 关联的轨迹文件名
+    last_record_ts: float = 0.0     # 上一次采样时间戳
+    stop_event: threading.Event = field(default_factory=threading.Event, repr=False) # 录制停止事件（线程协作）
+    stream_thread: Optional[threading.Thread] = field(default=None, repr=False)      # 后台采样线程
 
     def to_public(self) -> Dict[str, Any]:
         return {
@@ -189,7 +189,7 @@ class _MitComplianceAdapter:
         if commands:
             self.controller.send_mit_commands(commands)
 
-
+# 拖拽示教服务
 class DragTeachService:
     def __init__(
         self,
@@ -217,6 +217,7 @@ class DragTeachService:
         self._stream_hz = 20.0
         self._mit_adapters: Dict[str, _MitComplianceAdapter] = {}
         self._soft_original_profiles: Dict[str, Dict[str, List[float]]] = {}
+        self._safe_recovery_pid_scale = min(1.0, max(0.0, float(SAFE_RECOVERY_PID_SCALE)))
 
     def get_public_state(self) -> Dict[str, Any]:
         with self._lock:
@@ -245,7 +246,7 @@ class DragTeachService:
             self._stop_smooth_motion()
             self._stop_playback_if_needed()
             self._cancel_motion_if_needed(scope)
-            self._teardown_soft_compliance(scope)
+            self._teardown_soft_compliance(scope, use_safe_recovery=False)
             if controller_source == "mit_compliance":
                 self._activate_mit_compliance(
                     scope=scope,
@@ -275,10 +276,23 @@ class DragTeachService:
             self._notify_state()
             return self.get_public_state()
 
+    # && 退出拖拽示教
+    # 退出拖拽示教模式（disable）函数
+    # 主要逻辑说明：
+    # 1. 支持指定 arm_id 关闭单臂或全部，支持可选保留当前机械臂姿态（preserve_pose）。
+    # 2. 若 preserve_pose=True，会先抓取每个臂当前电机角度做快照，后续用于 hold。
+    # 3. 若处于流式录制（stream）模式，则先终止录制 session（不追加最后一点）。
+    # 4. 依次释放 mit 及软顺应控制。
+    # 5. 若要求保留姿态，则逐臂下发“保持当前姿态”命令，异常则写入 error 字段。
+    # 5.1 若 controller 提供 safe_recover_arm，则优先走统一安全恢复入口，避免刚性/速度瞬间恢复。
+    # 6. 最后更新各臂状态到“空闲”，并广播全局状态更新。
+
     def disable(self, arm_id: Optional[str] = None, *, preserve_pose: bool = True) -> Dict[str, Any]:
         with self._lock:
             scope = self._resolve_arm_scope(arm_id)
             pose_snapshot: Dict[str, List[float]] = {}
+            
+            # 1. 如需保留姿态，先采集目标臂当前各关节角度
             if preserve_pose:
                 self.controller.read_positions()
                 for aid in scope:
@@ -289,18 +303,38 @@ class DragTeachService:
                         pose_snapshot[aid] = [float(runtime.motors[mid].position) for mid in runtime.motor_ids]
                     except Exception:
                         continue
+
+            # 2. 若当前有拖拽录制 session，先终止流式录制（不保存最后采样点）
             if self._session and any(aid in self._session.arm_scope for aid in scope):
                 self._stop_stream_session(record_final_sample=False)
+
+            # 3. 依次释放 MIT、软顺应控制
             self._teardown_mit_compliance(scope)
-            self._teardown_soft_compliance(scope)
+            recovered_arms = self._teardown_soft_compliance(
+                scope,
+                pose_snapshot=pose_snapshot if preserve_pose else None,
+            )
+
+            # 4. 如需保留姿态，逐臂让机械臂保持当前模式下的快照姿态
             if preserve_pose and pose_snapshot:
                 try:
                     for aid in scope:
                         if aid in pose_snapshot:
-                            self.controller.hold_current_pose(arm_id=aid)
+                            if hasattr(self.controller, "safe_recover_arm"):
+                                if aid not in recovered_arms:
+                                    self.controller.safe_recover_arm(
+                                        aid,
+                                        target_angles=pose_snapshot[aid],
+                                        final_speed=getattr(self.controller, "speed_params", None),
+                                    )
+                            else:
+                                self.controller.hold_current_pose(arm_id=aid)
                 except Exception as exc:
+                    # 如持位异常，将异常信息记入对应臂状态
                     for aid in scope:
                         self._arm_states[aid].error = str(exc)
+
+            # 5. 全量重置臂的状态标志及 session 相关属性
             for aid in scope:
                 state = self._arm_states[aid]
                 state.mode_enabled = False
@@ -309,6 +343,8 @@ class DragTeachService:
                 state.segment_name = ""
                 state.stream_recording = False
                 state.error = None
+
+            # 6. 推送一次状态变更，返回公共状态对象
             self._notify_state()
             return self.get_public_state()
 
@@ -569,6 +605,22 @@ class DragTeachService:
         if "acceleration" in profile:
             arm_obj.set_accelerations(profile["acceleration"])
 
+    def _build_safe_restore_profile(self, profile: Dict[str, List[float]]) -> Dict[str, List[float]]:
+        safe_profile: Dict[str, List[float]] = {}
+        for key in ("position_kp", "velocity_kp", "velocity_ki"):
+            values = profile.get(key)
+            if values:
+                safe_profile[key] = [float(v) * self._safe_recovery_pid_scale for v in values]
+        velocities = profile.get("velocity")
+        if velocities:
+            safe_limit = max(0.01, float(getattr(self.controller, "safe_recovery_velocity", 0.15)))
+            safe_profile["velocity"] = [min(float(v), safe_limit) for v in velocities]
+        accelerations = profile.get("acceleration")
+        if accelerations:
+            safe_acc = max(1.0, float(getattr(self.controller, "safe_recovery_accel", 1.0)))
+            safe_profile["acceleration"] = [min(float(v), safe_acc) for v in accelerations]
+        return safe_profile
+
     def _activate_soft_compliance(
         self,
         *,
@@ -618,7 +670,13 @@ class DragTeachService:
                 except Exception:
                     pass
 
-    def _teardown_soft_compliance(self, scope: List[str]):
+    def _teardown_soft_compliance(
+        self,
+        scope: List[str],
+        pose_snapshot: Optional[Dict[str, List[float]]] = None,
+        use_safe_recovery: bool = True,
+    ):
+        recovered_arms = set()
         for aid in scope:
             runtime = getattr(self.controller, "arms", {}).get(aid)
             if runtime is None:
@@ -632,9 +690,21 @@ class DragTeachService:
             if not profile:
                 continue
             try:
+                safe_profile = self._build_safe_restore_profile(profile)
+                if safe_profile:
+                    self._apply_pid_profile(arm, safe_profile)
+                target_angles = None if pose_snapshot is None else pose_snapshot.get(aid)
+                if use_safe_recovery and hasattr(self.controller, "safe_recover_arm"):
+                    self.controller.safe_recover_arm(
+                        aid,
+                        target_angles=target_angles,
+                        final_speed=getattr(self.controller, "speed_params", None),
+                    )
+                    recovered_arms.add(aid)
                 self._apply_pid_profile(arm, profile)
             except Exception:
                 pass
+        return recovered_arms
 
     def _activate_mit_compliance(
         self,

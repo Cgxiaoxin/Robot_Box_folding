@@ -26,7 +26,13 @@ from .config import (
     JOINT_LIMITS,
     LEFT_MOTOR_IDS,
     RIGHT_MOTOR_IDS,
+    SAFE_RECOVERY_ACCEL,
+    SAFE_RECOVERY_RAMP_INTERVAL_S,
+    SAFE_RECOVERY_RAMP_STEPS,
+    SAFE_RECOVERY_SETTLE_S,
+    SAFE_RECOVERY_VELOCITY,
     SPEED_PRESETS,
+    TRAJECTORY_STREAMING_ENABLED,
     TRAJECTORY_START_ALIGN_TOLERANCE_RAD,
     TRAJECTORY_START_MAX_DEVIATION_RAD,
     TRAJECTORY_MAX_SEGMENT_DURATION_S,
@@ -151,6 +157,12 @@ class GroupController:
         self.connect_retry_count = 3
         self.connect_retry_delay_s = 0.25
         self.playback_control_hz = max(5.0, float(TRAJECTORY_PLAYBACK_CONTROL_HZ))
+        self.trajectory_streaming_enabled = bool(TRAJECTORY_STREAMING_ENABLED)
+        self.safe_recovery_velocity = max(0.01, float(SAFE_RECOVERY_VELOCITY))
+        self.safe_recovery_accel = max(1.0, float(SAFE_RECOVERY_ACCEL))
+        self.safe_recovery_settle_s = max(0.0, float(SAFE_RECOVERY_SETTLE_S))
+        self.safe_recovery_ramp_steps = max(1, int(SAFE_RECOVERY_RAMP_STEPS))
+        self.safe_recovery_ramp_interval_s = max(0.0, float(SAFE_RECOVERY_RAMP_INTERVAL_S))
         self.min_segment_duration_s = max(0.001, float(TRAJECTORY_MIN_SEGMENT_DURATION_S))
         self.max_segment_duration_s = max(
             self.min_segment_duration_s,
@@ -287,6 +299,68 @@ class GroupController:
         runtime.arm.set_velocities([v] * len(runtime.motor_ids))
         runtime.arm.set_accelerations([a] * len(runtime.motor_ids))
 
+    def _blend_scalar(self, start: float, end: float, alpha: float) -> float:
+        return float(start + (end - start) * alpha)
+
+    def safe_recover_arm(
+        self,
+        arm_id: str,
+        *,
+        target_angles: Optional[List[float]] = None,
+        final_speed: Optional[Dict[str, float]] = None,
+        enable_if_needed: bool = False,
+        clear_recovery_hold: bool = False,
+    ) -> bool:
+        with self._lock:
+            runtime = self.arms.get(arm_id)
+            if runtime is None:
+                self._emit_error(f"{arm_id} 臂未连接")
+                return False
+
+            try:
+                if enable_if_needed and not runtime.enabled:
+                    runtime.arm.set_control_mode(ControlMode.PP)
+                    runtime.arm.enable()
+                    runtime.enabled = True
+                    self.arm_states[arm_id].initialized = True
+
+                pose = [float(v) for v in (target_angles if target_angles is not None else self._read_arm_angles(runtime))]
+                target_speed = dict(final_speed or self.speed_params)
+                safe_speed = {
+                    "velocity": self.safe_recovery_velocity,
+                    "accel": self.safe_recovery_accel,
+                    "decel": self.safe_recovery_accel,
+                }
+
+                self._set_runtime_speed(
+                    runtime,
+                    safe_speed["velocity"],
+                    safe_speed["accel"],
+                    safe_speed["decel"],
+                )
+                self._set_arm_angles_direct(runtime, pose, blocking=True)
+                if self.safe_recovery_settle_s > 0.0:
+                    time.sleep(self.safe_recovery_settle_s)
+
+                for idx in range(1, self.safe_recovery_ramp_steps + 1):
+                    alpha = float(idx) / float(self.safe_recovery_ramp_steps)
+                    self._set_runtime_speed(
+                        runtime,
+                        self._blend_scalar(safe_speed["velocity"], float(target_speed.get("velocity", 0.5)), alpha),
+                        self._blend_scalar(safe_speed["accel"], float(target_speed.get("accel", 0.5)), alpha),
+                        self._blend_scalar(safe_speed["decel"], float(target_speed.get("decel", 0.5)), alpha),
+                    )
+                    if idx < self.safe_recovery_ramp_steps and self.safe_recovery_ramp_interval_s > 0.0:
+                        time.sleep(self.safe_recovery_ramp_interval_s)
+
+                if clear_recovery_hold:
+                    runtime.recovery_hold_required = False
+                self._refresh_runtime_state(runtime)
+                return True
+            except Exception as e:
+                self._emit_error(f"{arm_id} 臂安全恢复失败: {e}")
+                return False
+
     def _reset_playback_info(self):
         self.playback.trajectory_name = ""
         self.playback.current_point = 0
@@ -387,45 +461,65 @@ class GroupController:
             arms.append(("right", self.arms["right"]))
         return arms
 
+    # 机械臂初始化方法（支持急停后的安全恢复）
+    # ---------------------------------------------------
+    # 主要逻辑：
+    # - 检查目标机械臂是否已连接；
+    # - 设置为点到点控制模式（PP模式）并使能；
+    # - 设置全局运动速度参数；
+    # - 如果启用了自动回零（home），则执行归零操作；
+    # - 如果处于“急停恢复”场景（recovery_hold_required=True），
+    #   通过统一安全恢复入口先低速持位、再渐进恢复常规速度，并清除该标记；
+    # - 最后刷新本地机械臂状态。
+    # 若过程中发生异常，记录错误信息并报警。
+
     def init_arm(self, arm_id: str, mode: int = 5) -> bool:
-        del mode
+        """
+        初始化指定机械臂，支持急停后的安全恢复。
+
+        参数:
+            arm_id: 目标臂 id（"left" 或 "right"）。
+            mode: 预留参数，当前未用。
+
+        返回:
+            是否初始化成功（True/False）。
+        """
+        del mode  # mode 参数当前未被使用
         with self._lock:
             runtime = self.arms.get(arm_id)
             if runtime is None:
                 self._emit_error(f"{arm_id} 臂未连接")
                 return False
             try:
+                # 1. 设置为 PP 控制模式，2. 使能
                 runtime.arm.set_control_mode(ControlMode.PP)
                 runtime.arm.enable()
                 runtime.enabled = True
                 self.arm_states[arm_id].initialized = True
-                self.set_speed(
-                    self.speed_params.get("velocity", 0.5),
-                    self.speed_params.get("accel", 0.5),
-                    self.speed_params.get("decel", 0.5),
-                    arm_id=arm_id,
-                )
+                # 3. 配置运动速度参数
+                # 4. 若配置允许，则自动 home
                 if INIT_HOME_ENABLED:
                     runtime.arm.home(blocking=INIT_HOME_BLOCKING)
+                # 5. 若处于“急停恢复首次使能”，先保持当前位置并用 very_slow 阻塞一次
                 if runtime.recovery_hold_required:
+                    # 急停后首次重新使能时，先用 very_slow 速度在当前关节角做一次阻塞保持，再恢复常规速度参数，降低刚恢复时的冲击和抖动风险。
                     current_angles = self._read_arm_angles(runtime)
-                    safe_profile = SPEED_PRESETS.get("very_slow", self.speed_params)
-                    self._set_runtime_speed(
-                        runtime,
-                        safe_profile.get("velocity", 0.2),
-                        safe_profile.get("accel", 1.0),
-                        safe_profile.get("decel", 1.0),
-                    )
-                    self._set_arm_angles_direct(runtime, current_angles, blocking=True)
-                    self._set_runtime_speed(
-                        runtime,
+                    if not self.safe_recover_arm(
+                        arm_id,
+                        target_angles=current_angles,
+                        final_speed=self.speed_params,
+                        clear_recovery_hold=True,
+                    ):
+                        return False
+                else:
+                    self.set_speed(
                         self.speed_params.get("velocity", 0.5),
                         self.speed_params.get("accel", 0.5),
                         self.speed_params.get("decel", 0.5),
+                        arm_id=arm_id,
                     )
-                    runtime.recovery_hold_required = False
-                self._refresh_runtime_state(runtime)
-                return True
+                self._refresh_runtime_state(runtime) # 刷新机械臂状态
+                return True # 返回初始化成功
             except Exception as e:
                 self.arm_states[arm_id].error = str(e)
                 self._emit_error(f"{arm_id} 臂初始化失败: {e}")
@@ -937,12 +1031,38 @@ class GroupController:
             except Exception as e:
                 self._emit_error(f"{aid} 下发轨迹目标失败: {e}")
 
+    def _execute_segment_blocking(self, end_targets: Dict[str, List[float]], duration_s: float):
+        start_ts = time.perf_counter()
+        with self._lock:
+            if not self._validate_arm_targets_within_limits(end_targets, context="轨迹段目标"):
+                self._stop_playback.set()
+                return
+            for aid, target in end_targets.items():
+                runtime = self.arms.get(aid)
+                if runtime is None:
+                    continue
+                try:
+                    self._set_arm_angles_direct(runtime, target, blocking=True)
+                except Exception as e:
+                    self._emit_error(f"{aid} 下发轨迹段目标失败: {e}")
+                    self._stop_playback.set()
+                    return
+
+        remaining = max(0.0, float(duration_s) - (time.perf_counter() - start_ts))
+        if remaining > 0.0:
+            self._wait_with_pause(remaining)
+
     def _interpolate_and_execute_segment(
         self,
         start_targets: Dict[str, List[float]],
         end_targets: Dict[str, List[float]],
         duration_s: float,
     ):
+        if not self.trajectory_streaming_enabled:
+            del start_targets
+            self._execute_segment_blocking(end_targets, duration_s)
+            return
+
         dt = 1.0 / max(self.playback_control_hz, 1.0)
         start_ts = time.perf_counter()
         while True:

@@ -47,12 +47,24 @@ CARTESIAN_LIVE_INTERVAL = int(os.getenv("CARTESIAN_LIVE_INTERVAL", "80"))
 # 轨迹文件目录
 TRAJECTORIES_DIR = WEB_ROOT / "trajectories"
 
-# 轨迹播放参数（连续插值流）
+# 轨迹播放参数
+# A7 当前 SDK 在机械臂处于 moving 状态时，不支持再次启动新的整臂 motion。
+# 因此默认关闭高频非阻塞流式插值；若后续 SDK 明确支持运行中覆写目标，可再通过环境变量开启。
+TRAJECTORY_STREAMING_ENABLED = os.getenv("TRAJECTORY_STREAMING_ENABLED", "false").lower() == "true"
 TRAJECTORY_PLAYBACK_CONTROL_HZ = float(os.getenv("TRAJECTORY_PLAYBACK_CONTROL_HZ", "50.0"))
 TRAJECTORY_MIN_SEGMENT_DURATION_S = float(os.getenv("TRAJECTORY_MIN_SEGMENT_DURATION_S", "0.04"))
 TRAJECTORY_MAX_SEGMENT_DURATION_S = float(os.getenv("TRAJECTORY_MAX_SEGMENT_DURATION_S", "2.0"))
 TRAJECTORY_START_ALIGN_TOLERANCE_RAD = float(os.getenv("TRAJECTORY_START_ALIGN_TOLERANCE_RAD", "0.02"))
 TRAJECTORY_START_MAX_DEVIATION_RAD = float(os.getenv("TRAJECTORY_START_MAX_DEVIATION_RAD", "0.12"))
+
+# 统一安全恢复参数
+# 急停安全恢复相关参数
+SAFE_RECOVERY_VELOCITY = float(os.getenv("SAFE_RECOVERY_VELOCITY", "0.15"))  # 恢复初始速度（关节/s）
+SAFE_RECOVERY_ACCEL = float(os.getenv("SAFE_RECOVERY_ACCEL", "0.5"))         # 恢复初始加速度
+SAFE_RECOVERY_SETTLE_S = float(os.getenv("SAFE_RECOVERY_SETTLE_S", "0.5"))  # 初始持位后等待时间（秒）
+SAFE_RECOVERY_RAMP_STEPS = int(os.getenv("SAFE_RECOVERY_RAMP_STEPS", "3"))   # 恢复插值步数
+SAFE_RECOVERY_RAMP_INTERVAL_S = float(os.getenv("SAFE_RECOVERY_RAMP_INTERVAL_S", "0.12"))  # 步进插值间隔（秒）
+SAFE_RECOVERY_PID_SCALE = float(os.getenv("SAFE_RECOVERY_PID_SCALE", "0.35"))  # 急停PID比例缩放（恢复前松弛）
 
 # 日志目录
 LOG_DIR = WEB_ROOT / "logs"

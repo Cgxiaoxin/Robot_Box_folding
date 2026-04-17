@@ -250,3 +250,39 @@ def test_emergency_stop_requires_recovery_hold_on_reenable():
     assert runtime.recovery_hold_required is False
     assert arm.positions_set[-1][0] == tuple([0.1] * 7)
     assert arm.positions_set[-1][1] is True
+    velocity_calls = [values for kind, values in arm.profile if kind == "velocity"]
+    assert velocity_calls
+    assert velocity_calls[0][0] == controller.safe_recovery_velocity
+    assert velocity_calls[-1][0] == controller.speed_params["velocity"]
+
+
+def test_playback_segment_uses_blocking_move_when_streaming_disabled():
+    controller, _ = make_controller_with_fake_arms()
+    runtime = controller.arms["left"]
+    controller.trajectory_streaming_enabled = False
+
+    start_targets = {"left": [0.0] * len(runtime.motor_ids)}
+    end_targets = {"left": [0.05] * len(runtime.motor_ids)}
+
+    controller._interpolate_and_execute_segment(start_targets, end_targets, duration_s=0.0)
+
+    assert runtime.arm.positions_set
+    assert runtime.arm.positions_set[-1][0] == tuple([0.05] * len(runtime.motor_ids))
+    assert runtime.arm.positions_set[-1][1] is True
+
+
+def test_safe_recover_arm_ramps_speed_before_restore():
+    controller, _ = make_controller_with_fake_arms()
+    runtime = controller.arms["left"]
+
+    ok = controller.safe_recover_arm(
+        "left",
+        target_angles=[0.2] * len(runtime.motor_ids),
+        final_speed={"velocity": 0.5, "accel": 1.0, "decel": 1.0},
+    )
+
+    assert ok is True
+    assert runtime.arm.positions_set[-1] == (tuple([0.2] * len(runtime.motor_ids)), True)
+    velocity_calls = [values for kind, values in runtime.arm.profile if kind == "velocity"]
+    assert velocity_calls[0][0] == controller.safe_recovery_velocity
+    assert velocity_calls[-1][0] == 0.5

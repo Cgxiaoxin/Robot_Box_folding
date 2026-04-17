@@ -57,6 +57,8 @@ class _FakeController:
     def __init__(self):
         self.target = SimpleNamespace(value="left")
         self.playback = SimpleNamespace(state="idle")
+        self.safe_recovery_velocity = 0.15
+        self.safe_recovery_accel = 1.0
         self.arms = {
             "left": _FakeRuntime([51, 52]),
             "right": _FakeRuntime([61, 62]),
@@ -65,6 +67,7 @@ class _FakeController:
         self.stop_playback_calls = 0
         self.read_positions_calls = 0
         self.hold_current_pose_calls = []
+        self.safe_recover_calls = []
         self.positions = {
             "left": {"51": 0.1, "52": 0.2},
             "right": {"61": -0.1, "62": -0.2},
@@ -83,6 +86,16 @@ class _FakeController:
     def hold_current_pose(self, arm_id=None):
         self.hold_current_pose_calls.append(arm_id)
         return {}
+
+    def safe_recover_arm(self, arm_id, *, target_angles=None, final_speed=None, enable_if_needed=False, clear_recovery_hold=False):
+        self.safe_recover_calls.append({
+            "arm_id": arm_id,
+            "target_angles": list(target_angles) if target_angles is not None else None,
+            "final_speed": dict(final_speed or {}),
+            "enable_if_needed": enable_if_needed,
+            "clear_recovery_hold": clear_recovery_hold,
+        })
+        return True
 
     def record_point(self, name=None, arm_id=None):
         if arm_id in ("left", "right"):
@@ -220,6 +233,18 @@ def test_mit_mode_requires_explicit_config(tmp_path):
         service.enable(arm_id="left", controller_source="mit_compliance")
 
 
+def test_disable_uses_safe_recovery_before_restoring_pose(tmp_path):
+    controller = _FakeController()
+    service = DragTeachService(controller, trajectories_dir=tmp_path)
+
+    service.enable(arm_id="left")
+    service.disable(arm_id="left", preserve_pose=True)
+
+    assert controller.safe_recover_calls
+    assert controller.safe_recover_calls[0]["arm_id"] == "left"
+    assert controller.safe_recover_calls[0]["target_angles"] == [0.51, 0.52]
+
+
 def test_disable_preserves_current_pose(tmp_path):
     controller = _FakeController()
     service = DragTeachService(controller, trajectories_dir=tmp_path)
@@ -228,7 +253,8 @@ def test_disable_preserves_current_pose(tmp_path):
     state = service.disable(arm_id="left", preserve_pose=True)
 
     assert controller.read_positions_calls >= 1
-    assert controller.hold_current_pose_calls == ["left"]
+    assert controller.safe_recover_calls
+    assert controller.hold_current_pose_calls == []
     assert state["arms"]["left"]["status"] == "idle"
 
 
