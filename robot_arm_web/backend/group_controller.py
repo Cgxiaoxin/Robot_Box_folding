@@ -629,12 +629,12 @@ class GroupController:
                     state["joint_limits"][arm_id][str(mid)] = {"min": limits["min"], "max": limits["max"]}
             return state
 
-    def read_positions(self):
+    def read_positions(self, arm_id: Optional[str] = None):
         with self._lock:
-            for arm_id, runtime in self._get_target_arms():
+            for current_arm_id, runtime in self._get_target_arms(arm_id):
                 try:
                     self._refresh_runtime_state(runtime)
-                    self._sync_arm_state_to_public(arm_id, runtime)
+                    self._sync_arm_state_to_public(current_arm_id, runtime)
                 except Exception:
                     pass
 

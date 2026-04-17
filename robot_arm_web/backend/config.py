@@ -60,7 +60,7 @@ TRAJECTORY_START_MAX_DEVIATION_RAD = float(os.getenv("TRAJECTORY_START_MAX_DEVIA
 # 统一安全恢复参数
 # 急停安全恢复相关参数
 SAFE_RECOVERY_VELOCITY = float(os.getenv("SAFE_RECOVERY_VELOCITY", "0.15"))  # 恢复初始速度（关节/s）
-SAFE_RECOVERY_ACCEL = float(os.getenv("SAFE_RECOVERY_ACCEL", "0.5"))         # 恢复初始加速度
+SAFE_RECOVERY_ACCEL = float(os.getenv("SAFE_RECOVERY_ACCEL", "0.3"))         # 恢复初始加速度
 SAFE_RECOVERY_SETTLE_S = float(os.getenv("SAFE_RECOVERY_SETTLE_S", "0.5"))  # 初始持位后等待时间（秒）
 SAFE_RECOVERY_RAMP_STEPS = int(os.getenv("SAFE_RECOVERY_RAMP_STEPS", "3"))   # 恢复插值步数
 SAFE_RECOVERY_RAMP_INTERVAL_S = float(os.getenv("SAFE_RECOVERY_RAMP_INTERVAL_S", "0.12"))  # 步进插值间隔（秒）

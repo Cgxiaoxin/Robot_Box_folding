@@ -6,7 +6,8 @@ from backend.drag_teach_service import DragTeachService, DragTeachSession, flatt
 
 
 class _FakeArmHandle:
-    def __init__(self):
+    def __init__(self, runtime=None):
+        self._runtime = runtime
         self.enable_calls = 0
         self.profile_calls = []
         self.position_kp = []
@@ -42,15 +43,17 @@ class _FakeArmHandle:
         self.profile_calls.append(("move_j", list(target_angles), blocking))
 
     def get_angles(self):
-        return [0.0] * 7
+        if self._runtime is None:
+            return [0.0] * 7
+        return [float(self._runtime.motors[mid].position) for mid in self._runtime.motor_ids]
 
 
 class _FakeRuntime:
     def __init__(self, motor_ids):
-        self.arm = _FakeArmHandle()
         self.enabled = False
         self.motor_ids = list(motor_ids)
         self.motors = {mid: SimpleNamespace(enabled=False, position=float(mid) / 100.0) for mid in motor_ids}
+        self.arm = _FakeArmHandle(runtime=self)
 
 
 class _FakeController:
@@ -66,6 +69,7 @@ class _FakeController:
         self.speed_calls = []
         self.stop_playback_calls = 0
         self.read_positions_calls = 0
+        self.read_positions_args = []
         self.hold_current_pose_calls = []
         self.safe_recover_calls = []
         self.positions = {
@@ -80,8 +84,9 @@ class _FakeController:
         self.stop_playback_calls += 1
         self.playback.state = "idle"
 
-    def read_positions(self):
+    def read_positions(self, arm_id=None):
         self.read_positions_calls += 1
+        self.read_positions_args.append(arm_id)
 
     def hold_current_pose(self, arm_id=None):
         self.hold_current_pose_calls.append(arm_id)
@@ -256,6 +261,21 @@ def test_disable_preserves_current_pose(tmp_path):
     assert controller.safe_recover_calls
     assert controller.hold_current_pose_calls == []
     assert state["arms"]["left"]["status"] == "idle"
+
+
+def test_disable_captures_fresh_pose_for_requested_arm(tmp_path):
+    controller = _FakeController()
+    controller.target = SimpleNamespace(value="right")
+    controller.arms["left"].arm.get_angles = lambda: [1.1, 1.2]
+    controller.arms["right"].arm.get_angles = lambda: [2.1, 2.2]
+    service = DragTeachService(controller, trajectories_dir=tmp_path)
+
+    service.enable(arm_id="left")
+    service.disable(arm_id="left", preserve_pose=True)
+
+    assert "left" in controller.read_positions_args
+    assert controller.safe_recover_calls
+    assert controller.safe_recover_calls[0]["target_angles"] == [1.1, 1.2]
 
 
 def test_stream_duration_attaches_to_previous_point(monkeypatch):

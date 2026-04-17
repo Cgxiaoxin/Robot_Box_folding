@@ -219,6 +219,38 @@ class DragTeachService:
         self._soft_original_profiles: Dict[str, Dict[str, List[float]]] = {}
         self._safe_recovery_pid_scale = min(1.0, max(0.0, float(SAFE_RECOVERY_PID_SCALE)))
 
+    def _capture_pose_snapshot(self, scope: List[str]) -> Dict[str, List[float]]:
+        pose_snapshot: Dict[str, List[float]] = {}
+        read_positions = getattr(self.controller, "read_positions", None)
+        read_arm_angles = getattr(self.controller, "_read_arm_angles", None)
+
+        for aid in scope:
+            if callable(read_positions):
+                try:
+                    read_positions(arm_id=aid)
+                except TypeError:
+                    read_positions()
+                except Exception:
+                    pass
+
+            runtime = getattr(self.controller, "arms", {}).get(aid)
+            if runtime is None:
+                continue
+
+            try:
+                if callable(read_arm_angles):
+                    pose = [float(angle) for angle in read_arm_angles(runtime)]
+                elif hasattr(runtime, "arm") and hasattr(runtime.arm, "get_angles"):
+                    pose = [float(angle) for angle in runtime.arm.get_angles()]
+                else:
+                    pose = [float(runtime.motors[mid].position) for mid in runtime.motor_ids]
+            except Exception:
+                continue
+
+            if pose:
+                pose_snapshot[aid] = pose
+        return pose_snapshot
+
     def get_public_state(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -294,15 +326,7 @@ class DragTeachService:
             
             # 1. 如需保留姿态，先采集目标臂当前各关节角度
             if preserve_pose:
-                self.controller.read_positions()
-                for aid in scope:
-                    runtime = getattr(self.controller, "arms", {}).get(aid)
-                    if runtime is None:
-                        continue
-                    try:
-                        pose_snapshot[aid] = [float(runtime.motors[mid].position) for mid in runtime.motor_ids]
-                    except Exception:
-                        continue
+                pose_snapshot = self._capture_pose_snapshot(scope)
 
             # 2. 若当前有拖拽录制 session，先终止流式录制（不保存最后采样点）
             if self._session and any(aid in self._session.arm_scope for aid in scope):
