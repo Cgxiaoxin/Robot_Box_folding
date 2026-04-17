@@ -212,8 +212,8 @@ class DragTeachService:
             "right": DragTeachArmState("right"),
         }
         self._session: Optional[DragTeachSession] = None
-        self._joint_delta_threshold = 0.02
-        self._max_sample_gap_s = 0.5
+        self._joint_delta_threshold = 0.01
+        self._max_sample_gap_s = 0.1
         self._stream_hz = 20.0
         self._mit_adapters: Dict[str, _MitComplianceAdapter] = {}
         self._soft_original_profiles: Dict[str, Dict[str, List[float]]] = {}
@@ -366,7 +366,9 @@ class DragTeachService:
         *,
         name: Optional[str] = None,
         arm_id: Optional[str] = None,
-        delay: float = 1.0,
+        duration: Optional[float] = None,
+        delay: Optional[float] = None,
+        hold: float = 0.0,
         hand_action: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         with self._lock:
@@ -381,7 +383,9 @@ class DragTeachService:
             point = self._append_current_point(
                 self._session,
                 point_name=name,
-                delay=float(delay),
+                duration=duration,
+                delay=delay,
+                hold=float(hold),
                 sample_type="keyframe",
                 force=True,
                 hand_action=hand_action,
@@ -722,7 +726,9 @@ class DragTeachService:
         session: DragTeachSession,
         *,
         point_name: Optional[str] = None,
+        duration: Optional[float] = None,
         delay: Optional[float] = None,
+        hold: float = 0.0,
         sample_type: Optional[str] = None,
         force: bool,
         hand_action: Optional[Dict[str, Any]] = None,
@@ -736,14 +742,21 @@ class DragTeachService:
             return {}
 
         if sample_kind == "stream":
-            point_delay = 0.0 if not session.points else max(0.0, now - session.last_record_ts)
+            point_duration = 0.0 if not session.points else max(0.0, now - session.last_record_ts)
+            point_hold = 0.0
         else:
-            point_delay = float(delay if delay is not None else 1.0)
+            if duration is None:
+                duration = delay
+            point_duration = float(duration if duration is not None else 0.1)
+            point_hold = max(0.0, float(hold or 0.0))
 
         point = {
             "name": point_name or f"{session.name}_{len(session.points) + 1}",
             "positions": positions,
-            "delay": point_delay,
+            "duration": point_duration,
+            "hold": point_hold,
+            # 兼容旧读取逻辑：将 delay 映射到 duration。
+            "delay": point_duration,
             "sample_type": sample_kind,
             "timestamp": now,
             "segment_marker": session.name,

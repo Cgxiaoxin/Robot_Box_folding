@@ -27,6 +27,9 @@ from .config import (
     LEFT_MOTOR_IDS,
     RIGHT_MOTOR_IDS,
     SPEED_PRESETS,
+    TRAJECTORY_MAX_SEGMENT_DURATION_S,
+    TRAJECTORY_MIN_SEGMENT_DURATION_S,
+    TRAJECTORY_PLAYBACK_CONTROL_HZ,
     TRAJECTORIES_DIR,
     ZERO_OFFSET_FILE,
 )
@@ -144,6 +147,12 @@ class GroupController:
         self._load_zero_offsets_all()
         self.connect_retry_count = 3
         self.connect_retry_delay_s = 0.25
+        self.playback_control_hz = max(5.0, float(TRAJECTORY_PLAYBACK_CONTROL_HZ))
+        self.min_segment_duration_s = max(0.001, float(TRAJECTORY_MIN_SEGMENT_DURATION_S))
+        self.max_segment_duration_s = max(
+            self.min_segment_duration_s,
+            float(TRAJECTORY_MAX_SEGMENT_DURATION_S),
+        )
 
     def set_callbacks(
         self,
@@ -727,7 +736,7 @@ class GroupController:
                         break
                     self.playback.current_point = i + 1
                     self.playback.progress = (i + 1) / len(points) * 100
-                    self._execute_point(point)
+                    self._execute_point(point, points, i, speed_mult)
                     if self._on_playback_progress:
                         try:
                             self._on_playback_progress(
@@ -740,7 +749,6 @@ class GroupController:
                             )
                         except Exception:
                             pass
-                    time.sleep(max(0.0, float(point.get("delay", 1.0)) / max(speed_mult, 1e-6)))
                 if not loop or self._stop_playback.is_set():
                     break
                 self.playback.current_point = 0
@@ -752,23 +760,121 @@ class GroupController:
             if not self._stop_playback.is_set():
                 self.playback.progress = 100.0
 
-    def _execute_point(self, point: Dict):
+    def _effective_segment_duration(self, point: Dict, speed_mult: float) -> float:
+        raw_duration = point.get("duration")
+        if raw_duration is None:
+            raw_duration = point.get("delay", 0.1)
+        duration = float(raw_duration) / max(speed_mult, 1e-6)
+        return max(self.min_segment_duration_s, min(self.max_segment_duration_s, duration))
+
+    def _effective_hold_duration(self, point: Dict, speed_mult: float) -> float:
+        hold = float(point.get("hold", point.get("dwell", 0.0)))
+        return max(0.0, hold) / max(speed_mult, 1e-6)
+
+    def _wait_with_pause(self, duration_s: float):
+        end_time = time.perf_counter() + max(0.0, duration_s)
+        while time.perf_counter() < end_time:
+            if self._stop_playback.is_set():
+                return
+            while self._pause_playback.is_set():
+                if self._stop_playback.is_set():
+                    return
+                time.sleep(0.01)
+            remaining = end_time - time.perf_counter()
+            if remaining <= 0.0:
+                return
+            time.sleep(min(0.01, remaining))
+
+    def _build_arm_targets_for_positions(self, positions: Dict[str, Any]) -> Dict[str, List[float]]:
+        arm_targets: Dict[str, List[float]] = {}
+        for aid, runtime in self._get_target_arms():
+            try:
+                target = [float(x) for x in runtime.arm.get_angles()]
+                updated = False
+                for mid_str, pos in positions.items():
+                    mid = int(mid_str)
+                    if mid in runtime.motor_ids:
+                        target[runtime.motor_ids.index(mid)] = float(pos)
+                        updated = True
+                if updated:
+                    arm_targets[aid] = target
+            except Exception as e:
+                self._emit_error(f"{aid} 读取当前角度失败: {e}")
+        return arm_targets
+
+    def _send_arm_targets(self, arm_targets: Dict[str, List[float]]):
+        for aid, target in arm_targets.items():
+            runtime = self.arms.get(aid)
+            if runtime is None:
+                continue
+            try:
+                runtime.arm.move_j(target, blocking=False)
+            except Exception as e:
+                self._emit_error(f"{aid} 下发轨迹目标失败: {e}")
+
+    def _interpolate_and_execute_segment(
+        self,
+        start_targets: Dict[str, List[float]],
+        end_targets: Dict[str, List[float]],
+        duration_s: float,
+    ):
+        dt = 1.0 / max(self.playback_control_hz, 1.0)
+        start_ts = time.perf_counter()
+        while True:
+            if self._stop_playback.is_set():
+                return
+            while self._pause_playback.is_set():
+                if self._stop_playback.is_set():
+                    return
+                time.sleep(0.01)
+            elapsed = time.perf_counter() - start_ts
+            alpha = min(1.0, elapsed / max(duration_s, 1e-6))
+            step_targets: Dict[str, List[float]] = {}
+            for aid, end_vec in end_targets.items():
+                start_vec = start_targets.get(aid)
+                if start_vec is None or len(start_vec) != len(end_vec):
+                    step_targets[aid] = list(end_vec)
+                    continue
+                step_targets[aid] = [
+                    float(start + (end - start) * alpha)
+                    for start, end in zip(start_vec, end_vec)
+                ]
+            with self._lock:
+                self._send_arm_targets(step_targets)
+            if alpha >= 1.0:
+                break
+            time.sleep(dt)
+        with self._lock:
+            self._send_arm_targets(end_targets)
+
+    def _execute_point(self, point: Dict, points: List[Dict], index: int, speed_mult: float):
         positions = point.get("positions", {})
+        hold_duration = self._effective_hold_duration(point, speed_mult)
+
+        # 末点或空点位只执行可选停留，不再注入额外点后等待。
+        if index >= len(points) - 1 or not positions:
+            if hold_duration > 0.0:
+                self._wait_with_pause(hold_duration)
+            return
+
+        next_positions = points[index + 1].get("positions", {})
+        with self._lock:
+            start_targets = self._build_arm_targets_for_positions(positions)
+            end_targets = self._build_arm_targets_for_positions(next_positions)
+
+        if end_targets:
+            duration_s = self._effective_segment_duration(point, speed_mult)
+            self._interpolate_and_execute_segment(start_targets, end_targets, duration_s)
+
+        if hold_duration > 0.0:
+            self._wait_with_pause(hold_duration)
+
         with self._lock:
             for aid, runtime in self._get_target_arms():
                 try:
-                    target = runtime.arm.get_angles()
-                    updated = False
-                    for mid_str, pos in positions.items():
-                        mid = int(mid_str)
-                        if mid in runtime.motor_ids:
-                            target[runtime.motor_ids.index(mid)] = float(pos)
-                            updated = True
-                    if updated:
-                        runtime.arm.move_j(target, blocking=True)
-                        self._refresh_runtime_state(runtime)
+                    self._refresh_runtime_state(runtime)
                 except Exception as e:
-                    self._emit_error(f"{aid} 执行轨迹点失败: {e}")
+                    self._emit_error(f"{aid} 刷新轨迹状态失败: {e}")
 
     def pause_playback(self):
         if self.playback.state == PlaybackState.PLAYING:

@@ -67,6 +67,23 @@ let motionState = {
 
 let armConnectInFlight = false;
 
+function normalizePointTiming(point = {}, defaults = {}) {
+    const rawDuration = Number.isFinite(Number(point?.duration))
+        ? Number(point.duration)
+        : Number(point?.delay);
+    const rawHold = Number.isFinite(Number(point?.hold))
+        ? Number(point.hold)
+        : Number(point?.dwell);
+    const duration = Math.max(0, Number.isFinite(rawDuration) ? rawDuration : Number(defaults.duration ?? 0.1));
+    const hold = Math.max(0, Number.isFinite(rawHold) ? rawHold : Number(defaults.hold ?? 0.0));
+    return { duration, hold };
+}
+
+function getNumericInputValue(id, fallback) {
+    const value = parseFloat(document.getElementById(id)?.value || String(fallback));
+    return Number.isFinite(value) ? value : fallback;
+}
+
 const MOTION_MODE_META = {
     CARTESIAN_PTP: {
         desc: 'PTP：末端不保证直线，适合快速到位。',
@@ -228,8 +245,11 @@ socket.on('drag_teach:state', (data) => {
 });
 
 socket.on('drag_teach:keyframe_recorded', (data) => {
-    const delay = typeof data?.delay === 'number' ? `${data.delay.toFixed(2)}s` : '-';
-    addLog(`Drag Teach 记录关键帧: ${data?.name || '(unnamed)'} / delay=${delay}`, 'success');
+    const timing = normalizePointTiming(data, { duration: 0.1, hold: 0.0 });
+    addLog(
+        `Drag Teach 记录关键帧: ${data?.name || '(unnamed)'} / duration=${timing.duration.toFixed(2)}s, hold=${timing.hold.toFixed(2)}s`,
+        'success'
+    );
 });
 
 socket.on('drag_teach:segment_started', (data) => {
@@ -884,11 +904,14 @@ function dragTeachStartSegment() {
 
 function dragTeachRecordKeyframe() {
     const name = document.getElementById('traj-point-name')?.value || '';
-    const delay = parseFloat(document.getElementById('drag-keyframe-delay')?.value || '1.0');
+    const duration = Math.max(0, getNumericInputValue('drag-keyframe-delay', 0.1));
     socket.emit('drag_teach_record_keyframe', {
         arm_id: getSelectedArmIdForDragTeach(),
         name,
-        delay
+        duration,
+        hold: 0.0,
+        // 兼容旧后端/旧日志字段
+        delay: duration
     });
 }
 
@@ -1106,8 +1129,14 @@ function trajectoryRefreshList() {
 
 function trajectoryAddPoint() {
     const name = document.getElementById('traj-point-name')?.value || '';
-    const delay = parseFloat(document.getElementById('traj-point-delay')?.value || '1.0');
-    socket.emit('trajectory_add_point', { name: name, delay: delay });
+    const duration = Math.max(0, getNumericInputValue('traj-point-delay', 0.1));
+    socket.emit('trajectory_add_point', {
+        name: name,
+        duration: duration,
+        hold: 0.0,
+        // 兼容当前后端 trajectory_add_point 的旧字段读取
+        delay: duration
+    });
     // 清空名称输入框
     const nameEl = document.getElementById('traj-point-name');
     if (nameEl) nameEl.value = '';
@@ -1179,18 +1208,22 @@ function renderPointList(points) {
         return;
     }
 
-    container.innerHTML = points.map((pt, i) => `
+    container.innerHTML = points.map((pt, i) => {
+        const timing = normalizePointTiming(pt, { duration: 0.1, hold: 0.0 });
+        const holdText = timing.hold > 0 ? ` + hold ${timing.hold.toFixed(1)}s` : '';
+        return `
         <div class="traj-point-item">
             <span class="traj-point-idx">#${i + 1}</span>
             <span class="traj-point-name">${escapeHtml(pt.name || `point_${i + 1}`)}</span>
-            <span class="traj-point-delay">${(pt.delay || 0).toFixed(1)}s</span>
+            <span class="traj-point-delay">${timing.duration.toFixed(1)}s${holdText}</span>
             <div class="traj-point-actions">
                 <button onclick="trajectoryMovePoint(${i}, ${Math.max(0, i - 1)})" ${i === 0 ? 'disabled' : ''}>↑</button>
                 <button onclick="trajectoryMovePoint(${i}, ${Math.min(points.length - 1, i + 1)})" ${i === points.length - 1 ? 'disabled' : ''}>↓</button>
                 <button class="btn-del" onclick="trajectoryRemovePoint(${i})">✕</button>
             </div>
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 function renderFileList(files, mode) {

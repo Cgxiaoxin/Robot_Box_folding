@@ -18,7 +18,8 @@ class TrajectoryPoint:
     """轨迹点"""
     name: str
     positions: Dict[str, float]
-    delay: float = 1.0
+    duration: float = 0.1
+    hold: float = 0.0
     timestamp: Optional[float] = None
 
 
@@ -99,10 +100,14 @@ class TrajectoryEngine:
             
             points = []
             for p in data.get("points", []):
+                duration = p.get("duration")
+                if duration is None:
+                    duration = p.get("delay", 0.1)
                 points.append(TrajectoryPoint(
                     name=p.get("name", ""),
                     positions=p.get("positions", {}),
-                    delay=p.get("delay", 1.0),
+                    duration=float(duration),
+                    hold=float(p.get("hold", p.get("dwell", 0.0))),
                     timestamp=p.get("timestamp")
                 ))
             
@@ -140,7 +145,9 @@ class TrajectoryEngine:
                     {
                         "name": p.name,
                         "positions": p.positions,
-                        "delay": p.delay,
+                        "duration": p.duration,
+                        "hold": p.hold,
+                        "delay": p.duration,
                         "timestamp": p.timestamp
                     }
                     for p in trajectory.points
@@ -180,7 +187,7 @@ class TrajectoryEngine:
         
         Args:
             name: 轨迹名称
-            points: 点位列表 [{"name": "...", "positions": {...}, "delay": 1.0}, ...]
+            points: 点位列表 [{"name": "...", "positions": {...}, "duration": 0.1, "hold": 0.0}, ...]
             description: 描述
             loop: 是否循环
             
@@ -189,10 +196,14 @@ class TrajectoryEngine:
         """
         traj_points = []
         for p in points:
+            duration = p.get("duration")
+            if duration is None:
+                duration = p.get("delay", 0.1)
             traj_points.append(TrajectoryPoint(
                 name=p.get("name", f"point_{len(traj_points)}"),
                 positions=p.get("positions", {}),
-                delay=p.get("delay", 1.0),
+                duration=float(duration),
+                hold=float(p.get("hold", p.get("dwell", 0.0))),
                 timestamp=time.time()
             ))
         
@@ -244,7 +255,9 @@ class TrajectoryEngine:
         Returns:
             总时长（秒）
         """
-        return sum(p.delay for p in trajectory.points) / trajectory.speed_multiplier
+        motion_duration = sum(max(0.0, p.duration) for p in trajectory.points)
+        hold_duration = sum(max(0.0, p.hold) for p in trajectory.points)
+        return (motion_duration + hold_duration) / trajectory.speed_multiplier
 
 
 # 全局实例
