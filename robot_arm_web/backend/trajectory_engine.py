@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, InitVar
 from datetime import datetime
 
 from .config import TRAJECTORIES_DIR
@@ -21,6 +21,12 @@ class TrajectoryPoint:
     duration: float = 0.1
     hold: float = 0.0
     timestamp: Optional[float] = None
+    delay: InitVar[Optional[float]] = None
+
+    def __post_init__(self, delay: Optional[float]):
+        # 兼容仍然按旧语义传入 delay 的调用方。
+        if delay is not None:
+            self.duration = float(delay)
 
 
 @dataclass  
@@ -255,7 +261,7 @@ class TrajectoryEngine:
         Returns:
             总时长（秒）
         """
-        motion_duration = sum(max(0.0, p.duration) for p in trajectory.points)
+        motion_duration = sum(max(0.0, p.duration) for p in trajectory.points[:-1])
         hold_duration = sum(max(0.0, p.hold) for p in trajectory.points)
         return (motion_duration + hold_duration) / trajectory.speed_multiplier
 

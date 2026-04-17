@@ -35,6 +35,7 @@ def test_save_and_load_roundtrip(monkeypatch, tmp_path):
     assert loaded.speed_multiplier == 1.5
     assert len(loaded.points) == 2
     assert loaded.points[0].positions["51"] == 0.1
+    assert loaded.points[0].duration == 1.2
 
 
 def test_list_trajectories_and_delete(monkeypatch, tmp_path):
@@ -78,4 +79,30 @@ def test_merge_and_duration(monkeypatch, tmp_path):
     assert len(merged.points) == 2
 
     duration = engine.calculate_duration(t1)
-    assert duration == 0.5
+    assert duration == 0.0
+
+
+def test_load_delay_field_backward_compatible(monkeypatch, tmp_path):
+    _use_tmp_trajectory_dir(monkeypatch, tmp_path)
+    engine = te.TrajectoryEngine()
+
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        """
+{
+  "name": "legacy",
+  "points": [
+    {"name": "p1", "positions": {"51": 0.1}, "delay": 0.6},
+    {"name": "p2", "positions": {"51": 0.2}, "delay": 0.4, "hold": 0.2}
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    loaded = engine.load("legacy.json")
+
+    assert loaded is not None
+    assert loaded.points[0].duration == 0.6
+    assert loaded.points[1].duration == 0.4
+    assert loaded.points[1].hold == 0.2

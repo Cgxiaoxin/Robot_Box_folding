@@ -27,6 +27,8 @@ from .config import (
     LEFT_MOTOR_IDS,
     RIGHT_MOTOR_IDS,
     SPEED_PRESETS,
+    TRAJECTORY_START_ALIGN_TOLERANCE_RAD,
+    TRAJECTORY_START_MAX_DEVIATION_RAD,
     TRAJECTORY_MAX_SEGMENT_DURATION_S,
     TRAJECTORY_MIN_SEGMENT_DURATION_S,
     TRAJECTORY_PLAYBACK_CONTROL_HZ,
@@ -112,6 +114,7 @@ class ArmRuntime:
     motors: Dict[int, MotorCache] = field(default_factory=dict)
     zero_offsets: Dict[int, float] = field(default_factory=dict)
     enabled: bool = False
+    recovery_hold_required: bool = False
 
 
 class GroupController:
@@ -152,6 +155,11 @@ class GroupController:
         self.max_segment_duration_s = max(
             self.min_segment_duration_s,
             float(TRAJECTORY_MAX_SEGMENT_DURATION_S),
+        )
+        self.playback_start_align_tolerance_rad = max(0.0, float(TRAJECTORY_START_ALIGN_TOLERANCE_RAD))
+        self.playback_start_max_deviation_rad = max(
+            self.playback_start_align_tolerance_rad,
+            float(TRAJECTORY_START_MAX_DEVIATION_RAD),
         )
 
     def set_callbacks(
@@ -273,6 +281,40 @@ class GroupController:
             runtime.motors[mid].enabled = bool(runtime.enabled)
             runtime.motors[mid].mode = 5
 
+    def _set_runtime_speed(self, runtime: ArmRuntime, velocity: float, accel: float, decel: float):
+        v = max(0.0, float(velocity))
+        a = min(50.0, max(1.0, float(max(accel, decel))))
+        runtime.arm.set_velocities([v] * len(runtime.motor_ids))
+        runtime.arm.set_accelerations([a] * len(runtime.motor_ids))
+
+    def _reset_playback_info(self):
+        self.playback.trajectory_name = ""
+        self.playback.current_point = 0
+        self.playback.total_points = 0
+        self.playback.progress = 0.0
+
+    def _validate_joint_target(self, arm_id: str, motor_id: int, position: float, *, context: str) -> bool:
+        limits = self._get_joint_limit(arm_id, motor_id)
+        if limits is None:
+            return True
+        if limits["min"] <= position <= limits["max"]:
+            return True
+        self._emit_error(
+            f"{context}: {arm_id} 臂电机 {motor_id} 目标位置 {position:.4f} 超出软限位 "
+            f"[{limits['min']:.4f}, {limits['max']:.4f}]"
+        )
+        return False
+
+    def _validate_arm_targets_within_limits(self, arm_targets: Dict[str, List[float]], *, context: str) -> bool:
+        for aid, target in arm_targets.items():
+            runtime = self.arms.get(aid)
+            if runtime is None:
+                continue
+            for mid, pos in zip(runtime.motor_ids, target):
+                if not self._validate_joint_target(aid, mid, float(pos), context=context):
+                    return False
+        return True
+
     def connect(self, arm_id: str, can_channel: Optional[str] = None) -> bool:
         if arm_id not in self.arms:
             self._emit_error(f"未知机械臂ID: {arm_id}")
@@ -365,6 +407,23 @@ class GroupController:
                 )
                 if INIT_HOME_ENABLED:
                     runtime.arm.home(blocking=INIT_HOME_BLOCKING)
+                if runtime.recovery_hold_required:
+                    current_angles = self._read_arm_angles(runtime)
+                    safe_profile = SPEED_PRESETS.get("very_slow", self.speed_params)
+                    self._set_runtime_speed(
+                        runtime,
+                        safe_profile.get("velocity", 0.2),
+                        safe_profile.get("accel", 1.0),
+                        safe_profile.get("decel", 1.0),
+                    )
+                    self._set_arm_angles_direct(runtime, current_angles, blocking=True)
+                    self._set_runtime_speed(
+                        runtime,
+                        self.speed_params.get("velocity", 0.5),
+                        self.speed_params.get("accel", 0.5),
+                        self.speed_params.get("decel", 0.5),
+                    )
+                    runtime.recovery_hold_required = False
                 self._refresh_runtime_state(runtime)
                 return True
             except Exception as e:
@@ -408,6 +467,7 @@ class GroupController:
                     runtime.arm.emergency_stop()
                     runtime.arm.disable()
                     runtime.enabled = False
+                    runtime.recovery_hold_required = True
                     self.arm_states[aid].initialized = False
                 except Exception as e:
                     self._emit_error(f"{aid} 臂急停失败: {e}")
@@ -601,13 +661,9 @@ class GroupController:
     def set_speed(self, velocity: float, accel: float, decel: float, arm_id: Optional[str] = None):
         with self._lock:
             self.speed_params = {"velocity": float(velocity), "accel": float(accel), "decel": float(decel)}
-            v = max(0.0, float(velocity))
-            # A7 SDK acceleration 有效范围为 [1.0, 50.0]，避免初始化时报参数越界。
-            a = min(50.0, max(1.0, float(max(accel, decel))))
             for _, runtime in self._get_target_arms(arm_id):
                 try:
-                    runtime.arm.set_velocities([v] * 7)
-                    runtime.arm.set_accelerations([a] * 7)
+                    self._set_runtime_speed(runtime, velocity, accel, decel)
                 except Exception as e:
                     self._emit_error(f"设置速度失败: {e}")
 
@@ -707,6 +763,11 @@ class GroupController:
         if not points:
             self._emit_error("轨迹文件没有轨迹点")
             return
+        with self._lock:
+            if not self._prepare_playback_start(points):
+                self.playback.state = PlaybackState.IDLE
+                self._reset_playback_info()
+                return
         loop = loop_override if loop_override is not None else trajectory.get("loop", False)
         self._stop_playback.clear()
         self._pause_playback.clear()
@@ -759,6 +820,7 @@ class GroupController:
             self.playback.state = PlaybackState.IDLE
             if not self._stop_playback.is_set():
                 self.playback.progress = 100.0
+            self._playback_thread = None
 
     def _effective_segment_duration(self, point: Dict, speed_mult: float) -> float:
         raw_duration = point.get("duration")
@@ -802,7 +864,70 @@ class GroupController:
                 self._emit_error(f"{aid} 读取当前角度失败: {e}")
         return arm_targets
 
+    def _prepare_playback_start(self, points: List[Dict]) -> bool:
+        for idx, point in enumerate(points):
+            arm_targets = self._build_arm_targets_for_positions(point.get("positions", {}))
+            if not self._validate_arm_targets_within_limits(arm_targets, context=f"轨迹点 {idx + 1}"):
+                return False
+
+        if not points:
+            return False
+        first_targets = self._build_arm_targets_for_positions(points[0].get("positions", {}))
+        if not first_targets:
+            return True
+        if not self._validate_arm_targets_within_limits(first_targets, context="轨迹首点"):
+            return False
+
+        needs_align = False
+        align_diffs: Dict[str, float] = {}
+        for aid, target in first_targets.items():
+            runtime = self.arms.get(aid)
+            if runtime is None:
+                continue
+            current = self._read_arm_angles(runtime)
+            max_delta = max(abs(float(cur) - float(dst)) for cur, dst in zip(current, target))
+            align_diffs[aid] = max_delta
+            if max_delta > self.playback_start_max_deviation_rad:
+                self._emit_error(
+                    f"轨迹首点与当前姿态偏差过大: {aid} 臂最大偏差 {max_delta:.4f}rad，"
+                    f"超过允许值 {self.playback_start_max_deviation_rad:.4f}rad"
+                )
+                return False
+            if max_delta > self.playback_start_align_tolerance_rad:
+                needs_align = True
+
+        if not needs_align:
+            return True
+
+        speed_backup = dict(self.speed_params)
+        safe_profile = SPEED_PRESETS.get("very_slow", speed_backup)
+        try:
+            for aid, target in first_targets.items():
+                runtime = self.arms.get(aid)
+                if runtime is None:
+                    continue
+                self._set_runtime_speed(
+                    runtime,
+                    safe_profile.get("velocity", 0.2),
+                    safe_profile.get("accel", 1.0),
+                    safe_profile.get("decel", 1.0),
+                )
+                self._set_arm_angles_direct(runtime, target, blocking=True)
+                self._refresh_runtime_state(runtime)
+        finally:
+            for aid, runtime in self._get_target_arms():
+                self._set_runtime_speed(
+                    runtime,
+                    speed_backup.get("velocity", 0.5),
+                    speed_backup.get("accel", 0.5),
+                    speed_backup.get("decel", 0.5),
+                )
+        return True
+
     def _send_arm_targets(self, arm_targets: Dict[str, List[float]]):
+        if not self._validate_arm_targets_within_limits(arm_targets, context="轨迹插值"):
+            self._stop_playback.set()
+            return
         for aid, target in arm_targets.items():
             runtime = self.arms.get(aid)
             if runtime is None:
@@ -893,6 +1018,8 @@ class GroupController:
         if self._playback_thread and self._playback_thread.is_alive():
             self._playback_thread.join(timeout=2.0)
         self.playback.state = PlaybackState.IDLE
+        self._playback_thread = None
+        self._reset_playback_info()
 
     def set_target(self, target: str):
         try:

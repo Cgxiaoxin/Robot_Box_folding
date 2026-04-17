@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from backend.drag_teach_service import DragTeachService, DragTeachSession, flatten_record_point_to_positions
 
 
@@ -95,21 +97,17 @@ class _FakeController:
         return {}
 
 
-class _FakeMotionService:
+class _StreamController:
     def __init__(self):
-        self.cancel_calls = []
-        self._active_by_arm = {
-            "left": SimpleNamespace(
-                completed=False,
-                command=SimpleNamespace(command_id="cmd-1"),
-            )
-        }
+        self._points = [
+            {"name": "p1", "timestamp": 1.0, "arms": {"left": {"51": 0.0}}},
+            {"name": "p2", "timestamp": 2.0, "arms": {"left": {"51": 0.1}}},
+            {"name": "p3", "timestamp": 3.0, "arms": {"left": {"51": 0.3}}},
+        ]
 
-    def cancel(self, sid, payload):
-        self.cancel_calls.append((sid, payload))
-        runtime = self._active_by_arm.get(payload.get("arm_id"))
-        if runtime is not None:
-            runtime.completed = True
+    def record_point(self, name=None, arm_id=None):
+        del name, arm_id
+        return self._points.pop(0)
 
 
 def test_flatten_record_point_to_positions():
@@ -127,6 +125,22 @@ def test_flatten_record_point_to_positions():
 
 
 def test_enable_stops_playback_and_cancels_motion(tmp_path):
+    class _FakeMotionService:
+        def __init__(self):
+            self.cancel_calls = []
+            self._active_by_arm = {
+                "left": SimpleNamespace(
+                    completed=False,
+                    command=SimpleNamespace(command_id="cmd-1"),
+                )
+            }
+
+        def cancel(self, sid, payload):
+            self.cancel_calls.append((sid, payload))
+            runtime = self._active_by_arm.get(payload.get("arm_id"))
+            if runtime is not None:
+                runtime.completed = True
+
     controller = _FakeController()
     controller.playback.state = "playing"
     motion_service = _FakeMotionService()
@@ -202,12 +216,8 @@ def test_mit_mode_requires_explicit_config(tmp_path):
     controller = _FakeController()
     service = DragTeachService(controller, trajectories_dir=tmp_path)
 
-    try:
+    with pytest.raises(ValueError, match="mit_config_file"):
         service.enable(arm_id="left", controller_source="mit_compliance")
-    except ValueError as exc:
-        assert "mit_config_file" in str(exc)
-    else:
-        raise AssertionError("expected ValueError when MIT config is missing")
 
 
 def test_disable_preserves_current_pose(tmp_path):
@@ -220,3 +230,25 @@ def test_disable_preserves_current_pose(tmp_path):
     assert controller.read_positions_calls >= 1
     assert controller.hold_current_pose_calls == ["left"]
     assert state["arms"]["left"]["status"] == "idle"
+
+
+def test_stream_duration_attaches_to_previous_point(monkeypatch):
+    controller = _StreamController()
+    service = DragTeachService(controller=controller)
+
+    timestamps = iter([10.0, 10.3, 10.9])
+    monkeypatch.setattr("backend.drag_teach_service.time.time", lambda: next(timestamps))
+
+    session = service.start_segment(name="demo", arm_id="left", sample_type="stream")
+    assert session["points"][0]["duration"] == 0.0
+
+    service._append_current_point(service._session, sample_type="stream", force=True)
+    service._append_current_point(service._session, sample_type="stream", force=True)
+
+    points = service._session.points
+    assert len(points) == 3
+    assert points[0]["duration"] == pytest.approx(0.3)
+    assert points[0]["delay"] == pytest.approx(0.3)
+    assert points[1]["duration"] == pytest.approx(0.6)
+    assert points[1]["delay"] == pytest.approx(0.6)
+    assert points[2]["duration"] == 0.0

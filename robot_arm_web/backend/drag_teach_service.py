@@ -742,8 +742,12 @@ class DragTeachService:
             return {}
 
         if sample_kind == "stream":
-            point_duration = 0.0 if not session.points else max(0.0, now - session.last_record_ts)
+            point_duration = 0.0
             point_hold = 0.0
+            if session.points:
+                segment_duration = max(0.0, now - session.last_record_ts)
+                session.points[-1]["duration"] = segment_duration
+                session.points[-1]["delay"] = segment_duration
         else:
             if duration is None:
                 duration = delay
